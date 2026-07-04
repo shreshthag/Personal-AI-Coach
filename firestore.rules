@@ -1,0 +1,33 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function owns(uid) {
+      return signedIn() && request.auth.uid == uid;
+    }
+
+    match /users/{uid} {
+      allow read, create, update, delete: if owns(uid);
+
+      match /goals/{goalId} {
+        allow read, create, update, delete: if owns(uid) && goalId == "current";
+      }
+
+      match /dailyLogs/{date} {
+        allow read, create, update, delete: if owns(uid);
+
+        match /meals/{mealId} {
+          allow read, create, update, delete: if owns(uid);
+        }
+      }
+
+      match /weightEntries/{date} {
+        allow read, create, update, delete: if owns(uid);
+      }
+    }
+  }
+}

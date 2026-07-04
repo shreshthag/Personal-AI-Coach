@@ -1,0 +1,16 @@
+node_modules/
+.expo/
+dist/
+web-build/
+coverage/
+*.log
+.DS_Store
+.env
+.env.local
+.env.*.local
+google-services.json
+GoogleService-Info.plist
+firebase-debug.log
+firestore-debug.log
+functions/lib/
+functions/node_modules/
