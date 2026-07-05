@@ -4,7 +4,8 @@ export const defaultGoals: Goals = {
   calories: 2200,
   protein: 130,
   carbs: 250,
-  fat: 70
+  fat: 70,
+  mode: "cut"
 };
 
 export const mealTypes: MealType[] = ["breakfast", "lunch", "dinner", "snack"];

@@ -1,22 +1,22 @@
 import { useQuery } from "@tanstack/react-query";
-import { useState } from "react";
-import { TextInput, View } from "react-native";
+import { useCallback, useRef, useState } from "react";
+import { ActivityIndicator, FlatList, Pressable, TextInput, View } from "react-native";
 
 import { AppText } from "../components/AppText";
 import { Button } from "../components/Button";
-import { Card } from "../components/Card";
+import { CoachProposalCard } from "../components/CoachProposalCard";
 import { Notice } from "../components/Notice";
 import { ScreenShell } from "../components/ScreenShell";
-import { useCoach } from "../hooks/useCoach";
+import { defaultPersonaKey } from "../constants/personas";
+import { useCoachChat } from "../hooks/useCoach";
+import { useBodyProfile, useCoachSetup } from "../hooks/useUserProfile";
 import { useDailyMeals } from "../hooks/useDailyMeals";
 import { useGoals } from "../hooks/useGoals";
 import { useWeights } from "../hooks/useWeight";
 import { useAuth } from "../hooks/useAuth";
-import type { CoachContext } from "../models/gemini";
+import type { CoachChatMessage, CoachContext } from "../models/gemini";
 import { getMealsForDates } from "../repositories/mealRepository";
-import { useAppStore } from "../store/appStore";
 import { lastDateKeys, toDateKey } from "../utils/date";
-import { toFriendlyError } from "../utils/errors";
 
 const exampleQuestions = [
   "Can I eat pizza tonight?",
@@ -31,11 +31,10 @@ export function CoachScreen() {
   const goals = useGoals();
   const todayMeals = useDailyMeals(today);
   const weights = useWeights(today);
-  const coach = useCoach();
-  const lastCoachQuestion = useAppStore((state) => state.lastCoachQuestion);
-  const setLastCoachQuestion = useAppStore((state) => state.setLastCoachQuestion);
-  const [question, setQuestion] = useState(lastCoachQuestion);
-  const [error, setError] = useState<string | null>(null);
+  const setup = useCoachSetup();
+  const profileQuery = useBodyProfile();
+  const [draft, setDraft] = useState("");
+  const listRef = useRef<FlatList<CoachChatMessage>>(null);
 
   const last7Meals = useQuery({
     queryKey: user ? ["coachMeals", user.uid, today] : ["coachMeals", "anonymous", today],
@@ -50,94 +49,151 @@ export function CoachScreen() {
     initialData: []
   });
 
-  async function ask() {
-    const trimmed = question.trim();
-    if (!trimmed) {
-      setError("Ask a nutrition question first.");
-      return;
-    }
-
-    const context: CoachContext = {
+  const getContext = useCallback(
+    (): CoachContext => ({
       todayMeals: todayMeals.data ?? [],
       last7Days: last7Meals.data ?? [],
       goals: goals.data,
-      currentWeight: weights.data.find((entry) => entry.date === today) ?? weights.data.at(-1) ?? null
-    };
+      currentWeight: weights.data.find((entry) => entry.date === today) ?? weights.data.at(-1) ?? null,
+      recentWeights: weights.data ?? [],
+      userName: user?.displayName ?? null,
+      coachName: setup.data?.coachName ?? "Coach",
+      persona: setup.data?.persona ?? defaultPersonaKey,
+      profile: profileQuery.data ?? null
+    }),
+    [
+      todayMeals.data,
+      last7Meals.data,
+      goals.data,
+      weights.data,
+      today,
+      setup.data,
+      user?.displayName,
+      profileQuery.data
+    ]
+  );
 
-    setError(null);
-    try {
-      setLastCoachQuestion(trimmed);
-      await coach.mutateAsync({ question: trimmed, context });
-    } catch (coachError) {
-      setError(toFriendlyError(coachError, "The coach could not answer right now. Please retry."));
+  const { messages, proposals, status, sendMessage, confirmProposal, cancelProposal, resetChat } =
+    useCoachChat(getContext);
+
+  function send() {
+    const trimmed = draft.trim();
+    if (!trimmed) {
+      return;
     }
+    sendMessage(trimmed);
+    setDraft("");
+  }
+
+  function renderMessage({ item }: { item: CoachChatMessage }) {
+    if (item.kind === "proposal") {
+      const proposal = proposals[item.proposalId];
+      if (!proposal) {
+        return null;
+      }
+      return (
+        <CoachProposalCard
+          proposal={proposal}
+          onConfirm={() => confirmProposal(item.proposalId)}
+          onCancel={() => cancelProposal(item.proposalId)}
+        />
+      );
+    }
+    if (item.kind === "user") {
+      return (
+        <View className="max-w-[85%] self-end rounded-2xl rounded-br-md bg-leaf px-4 py-2.5">
+          <AppText variant="body" className="text-white">
+            {item.text}
+          </AppText>
+        </View>
+      );
+    }
+    if (item.kind === "coach") {
+      return (
+        <View className="max-w-[85%] self-start rounded-2xl rounded-bl-md border border-zinc-200 bg-white px-4 py-2.5 dark:border-zinc-800 dark:bg-zinc-900">
+          <AppText variant="body">{item.text}</AppText>
+        </View>
+      );
+    }
+    return <Notice tone="error" title="Coach issue" message={item.text} />;
   }
 
   return (
-    <ScreenShell>
-      <View className="gap-1" accessibilityRole="header">
-        <AppText variant="title">Ask Coach</AppText>
-        <AppText variant="caption">AI coaching can read your data, but it cannot change anything.</AppText>
+    <ScreenShell scroll={false}>
+      <View className="flex-row items-center justify-between gap-3" accessibilityRole="header">
+        <View className="flex-1 gap-1">
+          <AppText variant="title">{setup.data?.coachName ?? "Coach"}</AppText>
+          <AppText variant="caption">The coach can log meals and weight — with your confirmation.</AppText>
+        </View>
+        {messages.length > 0 ? (
+          <Button
+            title="New chat"
+            variant="ghost"
+            onPress={resetChat}
+            accessibilityLabel="Start a new coach chat"
+          />
+        ) : null}
       </View>
 
-      <Card className="gap-3" accessibilityLabel="Nutrition coaching query form">
-        <AppText variant="subtitle">Question</AppText>
+      <FlatList
+        ref={listRef}
+        className="flex-1"
+        data={messages}
+        keyExtractor={(item) => item.id}
+        renderItem={renderMessage}
+        keyboardShouldPersistTaps="handled"
+        onContentSizeChange={() => listRef.current?.scrollToEnd({ animated: true })}
+        contentContainerClassName="gap-3 pb-2"
+        ListFooterComponent={
+          status === "waitingForModel" ? (
+            <View className="max-w-[85%] flex-row items-center gap-2 self-start rounded-2xl rounded-bl-md border border-zinc-200 bg-white px-4 py-2.5 dark:border-zinc-800 dark:bg-zinc-900">
+              <ActivityIndicator color="#1E6B57" />
+              <AppText variant="caption">Thinking…</AppText>
+            </View>
+          ) : null
+        }
+        ListEmptyComponent={
+          <View className="gap-2" accessibilityLabel="Suggested questions list">
+            <AppText variant="caption">
+              Ask a question, or tell the coach what you ate or weigh — it can log it for you.
+            </AppText>
+            {exampleQuestions.map((example) => (
+              <Pressable
+                key={example}
+                onPress={() => sendMessage(example)}
+                className="rounded-2xl border border-zinc-200 bg-white px-4 py-3 dark:border-zinc-800 dark:bg-zinc-900"
+                accessibilityRole="button"
+                accessibilityLabel={`Send suggested question: ${example}`}
+              >
+                <AppText variant="body">{example}</AppText>
+              </Pressable>
+            ))}
+          </View>
+        }
+      />
+
+      <View className="flex-row items-end gap-2">
         <TextInput
-          value={question}
-          onChangeText={setQuestion}
+          value={draft}
+          onChangeText={setDraft}
           multiline
-          placeholder="Ask about dinner, cravings, progress, or macros"
+          editable={status === "idle"}
+          placeholder={
+            status === "awaitingConfirmation"
+              ? "Confirm or cancel the suggestion above"
+              : "Ask about dinner, cravings, progress, or macros"
+          }
           placeholderTextColor="#8A968E"
-          className="min-h-28 rounded-lg border border-zinc-200 bg-white p-3 text-base text-ink dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-50"
-          accessibilityLabel="Coaching question text input"
+          className="max-h-32 flex-1 rounded-2xl border border-zinc-200 bg-white p-3 text-base text-ink dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-50"
+          accessibilityLabel="Coach chat message input"
         />
-        <View className="gap-2" accessibilityLabel="Suggested questions list">
-          {exampleQuestions.map((example) => (
-            <Button
-              key={example}
-              title={example}
-              variant="ghost"
-              onPress={() => setQuestion(example)}
-              accessibilityLabel={`Select suggested question: ${example}`}
-            />
-          ))}
-        </View>
         <Button
-          title="Ask coach"
-          loading={coach.isPending}
-          onPress={ask}
-          accessibilityLabel="Submit question to your AI coach"
+          title="Send"
+          disabled={status !== "idle" || draft.trim().length === 0}
+          onPress={send}
+          accessibilityLabel="Send message to your AI coach"
         />
-      </Card>
-
-      {coach.data ? (
-        <Card className="gap-3" accessibilityLabel="AI Coach response summary">
-          <AppText variant="subtitle">Coach</AppText>
-          <AppText variant="body">{coach.data.answer}</AppText>
-          {coach.data.suggestions.length > 0 ? (
-            <View className="gap-2" accessibilityLabel="Coach suggestions list">
-              <AppText variant="label">Suggestions</AppText>
-              {coach.data.suggestions.map((suggestion, index) => (
-                <AppText key={`${suggestion}-${index}`} variant="caption">
-                  {suggestion}
-                </AppText>
-              ))}
-            </View>
-          ) : null}
-          {coach.data.cautions.length > 0 ? (
-            <View className="gap-2" accessibilityLabel="Coach caution items list">
-              <AppText variant="label">Cautions</AppText>
-              {coach.data.cautions.map((caution, index) => (
-                <AppText key={`${caution}-${index}`} variant="caption">
-                  {caution}
-                </AppText>
-              ))}
-            </View>
-          ) : null}
-        </Card>
-      ) : null}
-
-      {error ? <Notice tone="error" title="Coach issue" message={error} /> : null}
+      </View>
     </ScreenShell>
   );
 }

@@ -31,6 +31,7 @@ export async function getGoals(uid: string): Promise<Goals> {
       protein: readNumber(data.protein, defaultGoals.protein),
       carbs: readNumber(data.carbs, defaultGoals.carbs),
       fat: readNumber(data.fat, defaultGoals.fat),
+      mode: readString(data.mode, defaultGoals.mode),
       updatedAt: readString(data.updatedAt)
     };
     await cacheGoals(uid, goals);
@@ -45,7 +46,8 @@ export async function saveGoals(uid: string, goals: Goals): Promise<Goals> {
     calories: Math.round(goals.calories),
     protein: Math.round(goals.protein),
     carbs: Math.round(goals.carbs),
-    fat: Math.round(goals.fat)
+    fat: Math.round(goals.fat),
+    mode: goals.mode.trim() || defaultGoals.mode
   };
 
   if (!isFirebaseConfigured() || uid.startsWith("sandbox")) {

@@ -111,3 +111,28 @@ export function useDeleteMeal(date: DateKey) {
     }
   });
 }
+
+export function useDeleteMealEntry() {
+  const { user } = useAuth();
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async ({ date, mealId }: { date: DateKey; mealId: string }) => {
+      if (!user) {
+        throw new Error("Sign in before deleting meals.");
+      }
+      await deleteMeal(user.uid, date, mealId);
+      return { date, mealId };
+    },
+    onSuccess: ({ date, mealId }) => {
+      if (!user) {
+        return;
+      }
+      queryClient.setQueryData<Meal[]>(queryKeys.dailyMeals(user.uid, date), (current = []) =>
+        current.filter((meal) => meal.id !== mealId)
+      );
+      queryClient.invalidateQueries({ queryKey: ["weeklySummary", user.uid] });
+      queryClient.invalidateQueries({ queryKey: ["coachMeals", user.uid] });
+    }
+  });
+}

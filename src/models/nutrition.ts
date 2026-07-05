@@ -22,6 +22,7 @@ export type NutritionTotals = {
 };
 
 export type Goals = NutritionTotals & {
+  mode: string;
   updatedAt?: string;
 };
 

@@ -16,8 +16,39 @@ export const mealAnalysisSchema = z.object({
   question: z.string()
 });
 
-export const coachAnswerSchema = z.object({
-  answer: z.string().min(1),
-  suggestions: z.array(z.string()),
-  cautions: z.array(z.string())
+const dateKeyRegex = /^\d{4}-\d{2}-\d{2}$/;
+
+export const logMealArgsSchema = z.object({
+  date: z.string().regex(dateKeyRegex),
+  mealType: z.enum(["breakfast", "lunch", "dinner", "snack"]),
+  foods: z.array(foodSchema).min(1),
+  notes: z.string().optional().default("")
 });
+
+export const logWeightArgsSchema = z.object({
+  date: z.string().regex(dateKeyRegex),
+  weightKg: z.number().positive().max(400)
+});
+
+export const deleteMealArgsSchema = z.object({
+  date: z.string().regex(dateKeyRegex),
+  mealId: z.string().min(1)
+});
+
+export const deleteWeightArgsSchema = z.object({
+  date: z.string().regex(dateKeyRegex)
+});
+
+export const webSearchArgsSchema = z.object({
+  query: z.string().min(1)
+});
+
+export const updateGoalArgsSchema = z
+  .object({
+    calories: z.number().positive().optional(),
+    protein: z.number().nonnegative().optional(),
+    carbs: z.number().nonnegative().optional(),
+    fat: z.number().nonnegative().optional(),
+    mode: z.string().min(1).optional()
+  })
+  .refine((data) => Object.values(data).some((value) => value !== undefined), "No goal fields to update");

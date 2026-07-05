@@ -17,10 +17,12 @@ import { DashboardScreen } from "../screens/DashboardScreen";
 import { GoalsScreen } from "../screens/GoalsScreen";
 import { LogMealScreen } from "../screens/LogMealScreen";
 import { MealHistoryScreen } from "../screens/MealHistoryScreen";
+import { OnboardingScreen } from "../screens/OnboardingScreen";
 import { WeeklySummaryScreen } from "../screens/WeeklySummaryScreen";
 import { WeightScreen } from "../screens/WeightScreen";
 import type { AppTabParamList, RootStackParamList } from "../types/navigation";
 import { useAuth } from "../hooks/useAuth";
+import { useBodyProfile, useCoachSetup } from "../hooks/useUserProfile";
 
 const Stack = createNativeStackNavigator<RootStackParamList>();
 const Tab = createBottomTabNavigator<AppTabParamList>();
@@ -78,15 +80,28 @@ function navigationTheme(isDark: boolean): Theme {
 export function RootNavigator() {
   const { user, initializing } = useAuth();
   const colorScheme = useColorScheme();
+  const setup = useCoachSetup();
+  const profile = useBodyProfile();
 
   if (initializing) {
     return <LoadingState label="Preparing your tracker" />;
   }
 
+  if (user && (setup.isLoading || profile.isLoading)) {
+    return <LoadingState label="Preparing your tracker" />;
+  }
+
+  const needsOnboarding =
+    Boolean(user) && (!setup.data?.coachName || !setup.data?.persona || !profile.data);
+
   return (
     <NavigationContainer theme={navigationTheme(colorScheme === "dark")}>
       <Stack.Navigator screenOptions={{ headerShown: false }}>
-        {user ? (
+        {!user ? (
+          <Stack.Screen name="Auth" component={AuthScreen} />
+        ) : needsOnboarding ? (
+          <Stack.Screen name="Onboarding" component={OnboardingScreen} />
+        ) : (
           <>
             <Stack.Screen name="AppTabs" component={AppTabs} />
             <Stack.Screen name="Goals" component={GoalsScreen} options={{ presentation: "modal" }} />
@@ -96,8 +111,6 @@ export function RootNavigator() {
               options={{ presentation: "modal" }}
             />
           </>
-        ) : (
-          <Stack.Screen name="Auth" component={AuthScreen} />
         )}
       </Stack.Navigator>
     </NavigationContainer>

@@ -1,11 +1,14 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 
 import type { Goals, Meal, MealDraft, WeightEntry } from "../../models/nutrition";
+import type { BodyProfile } from "../../models/user";
 
 const key = {
   dailyMeals: (uid: string, date: string) => `daily-meals:${uid}:${date}`,
   weights: (uid: string) => `weights:${uid}`,
   goals: (uid: string) => `goals:${uid}`,
+  coachSetup: (uid: string) => `coach-setup:${uid}`,
+  bodyProfile: (uid: string) => `body-profile:${uid}`,
   queue: "offline-mutation-queue"
 };
 
@@ -75,6 +78,12 @@ export async function getWeightsLocal(uid: string, startDate: string, endDate: s
   return entries.filter((item) => item.date >= startDate && item.date <= endDate);
 }
 
+export async function deleteWeightLocal(uid: string, date: string): Promise<void> {
+  const entries = await readCachedWeights(uid);
+  const next = entries.filter((item) => item.date !== date);
+  await cacheWeights(uid, next);
+}
+
 export async function cacheGoals(uid: string, goals: Goals): Promise<void> {
   await AsyncStorage.setItem(key.goals(uid), JSON.stringify(goals));
 }
@@ -82,6 +91,26 @@ export async function cacheGoals(uid: string, goals: Goals): Promise<void> {
 export async function readCachedGoals(uid: string): Promise<Goals | null> {
   const raw = await AsyncStorage.getItem(key.goals(uid));
   return raw ? (JSON.parse(raw) as Goals) : null;
+}
+
+export type CoachSetup = { coachName: string; persona: string };
+
+export async function cacheCoachSetup(uid: string, setup: CoachSetup): Promise<void> {
+  await AsyncStorage.setItem(key.coachSetup(uid), JSON.stringify(setup));
+}
+
+export async function readCachedCoachSetup(uid: string): Promise<CoachSetup | null> {
+  const raw = await AsyncStorage.getItem(key.coachSetup(uid));
+  return raw ? (JSON.parse(raw) as CoachSetup) : null;
+}
+
+export async function cacheBodyProfile(uid: string, profile: BodyProfile): Promise<void> {
+  await AsyncStorage.setItem(key.bodyProfile(uid), JSON.stringify(profile));
+}
+
+export async function readCachedBodyProfile(uid: string): Promise<BodyProfile | null> {
+  const raw = await AsyncStorage.getItem(key.bodyProfile(uid));
+  return raw ? (JSON.parse(raw) as BodyProfile) : null;
 }
 
 export async function queuePendingWrite(write: PendingWrite): Promise<void> {

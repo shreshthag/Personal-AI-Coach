@@ -9,6 +9,7 @@ import type {
   WeightEntry,
   WeightSummary
 } from "../models/nutrition";
+import type { BodyProfile } from "../models/user";
 import { lastDateKeys } from "./date";
 
 export const emptyTotals: NutritionTotals = {
@@ -88,6 +89,54 @@ export function buildWeightSummary(today: string, entries: WeightEntry[]): Weigh
     sevenDayAverageKg: average,
     changeThisWeekKg:
       firstThisWeek && latest ? roundMacro(latest.weightKg - firstThisWeek.weightKg) : null
+  };
+}
+
+const activityMultipliers: Record<BodyProfile["activityLevel"], number> = {
+  sedentary: 1.35,
+  moderate: 1.55,
+  active: 1.75
+};
+
+const proteinPerKgByMode: Record<"cut" | "bulk" | "maintain", number> = {
+  cut: 2.0,
+  bulk: 1.8,
+  maintain: 1.6
+};
+
+function roundToNearest(value: number, step: number, minimum: number): number {
+  return Math.max(minimum, Math.round(value / step) * step);
+}
+
+export function classifyMode(mode: string): "cut" | "bulk" | "maintain" {
+  const normalized = mode.toLowerCase();
+  if (["cut", "deficit", "lose", "shred", "lean"].some((keyword) => normalized.includes(keyword))) {
+    return "cut";
+  }
+  if (["bulk", "gain", "surplus", "mass"].some((keyword) => normalized.includes(keyword))) {
+    return "bulk";
+  }
+  return "maintain";
+}
+
+export function computeTargets(profile: BodyProfile, weightKg: number, mode: string): Goals {
+  const { heightCm, gender, age, activityLevel } = profile;
+  const genderOffset = gender === "male" ? 5 : gender === "female" ? -161 : -78;
+  const bmr = 10 * weightKg + 6.25 * heightCm - 5 * age + genderOffset;
+  const tdee = bmr * activityMultipliers[activityLevel];
+
+  const bucket = classifyMode(mode);
+  const rawCalories = bucket === "cut" ? tdee * 0.8 : bucket === "bulk" ? tdee * 1.1 : tdee;
+  const rawProtein = weightKg * proteinPerKgByMode[bucket];
+  const rawFat = (rawCalories * 0.25) / 9;
+  const rawCarbs = (rawCalories - rawProtein * 4 - rawFat * 9) / 4;
+
+  return {
+    calories: roundToNearest(rawCalories, 50, 1200),
+    protein: roundToNearest(rawProtein, 5, 0),
+    carbs: roundToNearest(rawCarbs, 5, 0),
+    fat: roundToNearest(rawFat, 5, 0),
+    mode
   };
 }
 

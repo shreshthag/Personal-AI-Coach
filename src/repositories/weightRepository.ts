@@ -1,5 +1,6 @@
 import {
   collection,
+  deleteDoc,
   doc,
   documentId,
   getDocs,
@@ -14,7 +15,7 @@ import type { DateKey, WeightEntry } from "../models/nutrition";
 import { db } from "../services/firebase/config";
 import { readBoolean, readNumber, readRecord } from "./firestoreParsers";
 import { isFirebaseConfigured } from "../services/config/env";
-import { saveWeightLocal, getWeightsLocal } from "../services/cache/offlineCache";
+import { saveWeightLocal, getWeightsLocal, deleteWeightLocal } from "../services/cache/offlineCache";
 
 function weightsCollection(uid: string) {
   return collection(db, "users", uid, "weightEntries");
@@ -51,6 +52,16 @@ export async function saveWeight(uid: string, entry: WeightEntry): Promise<Weigh
     await saveWeightLocal(uid, { ...normalized, pending: true });
     throw error;
   }
+}
+
+export async function deleteWeight(uid: string, date: DateKey): Promise<void> {
+  if (!isFirebaseConfigured() || uid.startsWith("sandbox")) {
+    await deleteWeightLocal(uid, date);
+    return;
+  }
+
+  await deleteDoc(weightDocument(uid, date));
+  await deleteWeightLocal(uid, date);
 }
 
 export async function getWeightsForRange(uid: string, startDate: DateKey, endDate: DateKey): Promise<WeightEntry[]> {

@@ -2,7 +2,7 @@ import type { CompositeNavigationProp } from "@react-navigation/native";
 import { useNavigation } from "@react-navigation/native";
 import type { BottomTabNavigationProp } from "@react-navigation/bottom-tabs";
 import type { NativeStackNavigationProp } from "@react-navigation/native-stack";
-import { View } from "react-native";
+import { Pressable, View } from "react-native";
 import { useState, useCallback } from "react";
 
 import { AppText } from "../components/AppText";
@@ -55,9 +55,20 @@ export function DashboardScreen() {
 
   return (
     <ScreenShell refreshing={refreshing} onRefresh={onRefresh}>
-      <View className="gap-1" accessibilityRole="header">
-        <AppText variant="title">Dashboard</AppText>
-        <AppText variant="caption">Today’s nutrition and weight snapshot</AppText>
+      <View className="flex-row items-center justify-between" accessibilityRole="header">
+        <View className="gap-1">
+          <AppText variant="title">Dashboard</AppText>
+          <AppText variant="caption">Today’s nutrition and weight snapshot</AppText>
+        </View>
+        <Pressable
+          onPress={() => navigation.navigate("Goals")}
+          className="rounded-full border border-leaf/30 bg-mint px-3 py-1.5 dark:bg-zinc-900"
+          accessibilityLabel="Current goal mode — open goals"
+        >
+          <AppText variant="caption">
+            {goals.data.mode.charAt(0).toUpperCase() + goals.data.mode.slice(1)}
+          </AppText>
+        </Pressable>
       </View>
 
       <MacroSummary summary={summary} goals={goals.data} />

@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect } from "react";
 
 import type { DateKey, WeightEntry } from "../models/nutrition";
-import { getWeightsForRange, saveWeight } from "../repositories/weightRepository";
+import { deleteWeight, getWeightsForRange, saveWeight } from "../repositories/weightRepository";
 import { cacheWeights, getWeightsLocal, queuePendingWrite, readCachedWeights } from "../services/cache/offlineCache";
 import { lastDateKeys } from "../utils/date";
 import { createId } from "../utils/id";
@@ -70,6 +70,28 @@ export function useSaveWeight() {
       }
     },
     onSuccess: (entry) => {
+      if (!user) {
+        return;
+      }
+      queryClient.invalidateQueries({ queryKey: ["weights", user.uid] });
+      queryClient.invalidateQueries({ queryKey: ["weeklySummary", user.uid] });
+    }
+  });
+}
+
+export function useDeleteWeight() {
+  const { user } = useAuth();
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async ({ date }: { date: DateKey }) => {
+      if (!user) {
+        throw new Error("Sign in before deleting weight.");
+      }
+      await deleteWeight(user.uid, date);
+      return date;
+    },
+    onSuccess: () => {
       if (!user) {
         return;
       }
