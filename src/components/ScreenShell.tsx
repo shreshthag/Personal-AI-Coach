@@ -1,5 +1,5 @@
 import type { PropsWithChildren } from "react";
-import { KeyboardAvoidingView, Platform, ScrollView, View, RefreshControl } from "react-native";
+import { KeyboardAvoidingView, ScrollView, View, RefreshControl } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
 type ScreenShellProps = PropsWithChildren<{
@@ -35,7 +35,7 @@ export function ScreenShell({ children, scroll = true, refreshing = false, onRef
     <SafeAreaView className="flex-1 bg-oat dark:bg-zinc-950" edges={["top", "left", "right"]}>
       <KeyboardAvoidingView
         className="flex-1"
-        behavior={Platform.OS === "ios" ? "padding" : undefined}
+        behavior="padding"
       >
         {content}
       </KeyboardAvoidingView>
