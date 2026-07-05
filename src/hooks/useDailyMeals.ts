@@ -19,7 +19,8 @@ export function useDailyMeals(date: DateKey) {
     queryFn: async () => {
       if (!uid) return [];
       return await getDailyMeals(uid, date);
-    }
+    },
+    initialData: []
   });
 
   // Load cache into query client on mount if we're empty
