@@ -52,3 +52,10 @@ export const updateGoalArgsSchema = z
     mode: z.string().min(1).optional()
   })
   .refine((data) => Object.values(data).some((value) => value !== undefined), "No goal fields to update");
+
+export const goalTargetsSchema = z.object({
+  calories: z.number().min(1000).max(6000),
+  protein: z.number().min(30).max(400),
+  carbs: z.number().min(0).max(900),
+  fat: z.number().min(20).max(300)
+});

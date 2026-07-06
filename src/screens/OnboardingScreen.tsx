@@ -15,7 +15,7 @@ import { useSaveWeight, useWeights } from "../hooks/useWeight";
 import type { ActivityLevel, BodyProfile, Gender } from "../models/user";
 import { toDateKey } from "../utils/date";
 import { toFriendlyError } from "../utils/errors";
-import { computeTargets } from "../utils/nutrition";
+import { generateGoalTargets } from "../services/gemini/geminiClient";
 
 const genderOptions: { key: Gender; label: string }[] = [
   { key: "male", label: "Male" },
@@ -107,7 +107,7 @@ export function OnboardingScreen() {
 
       await saveWeight.mutateAsync({ date: today, weightKg: weightNumber });
 
-      const targets = computeTargets(profile, weightNumber, trimmedGoal);
+      const targets = await generateGoalTargets(profile, weightNumber, trimmedGoal);
       await updateGoals.mutateAsync(targets);
     } catch (saveError) {
       setError(toFriendlyError(saveError, "Could not save your coach setup. Please retry."));

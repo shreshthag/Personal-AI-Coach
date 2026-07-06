@@ -4,8 +4,11 @@ import type { Part } from "firebase/ai";
 import { firebaseApp } from "../firebase/config";
 import { isFirebaseConfigured } from "../config/env";
 import type { GeminiMealAnalysis } from "../../models/gemini";
+import type { Goals } from "../../models/nutrition";
+import type { BodyProfile } from "../../models/user";
 import { AppError } from "../../utils/errors";
-import { mealAnalysisSchema } from "./schemas";
+import { computeTargets } from "../../utils/nutrition";
+import { mealAnalysisSchema, goalTargetsSchema } from "./schemas";
 
 type AnalyzeMealInput = {
   text?: string;
@@ -148,5 +151,58 @@ export async function analyzeMeal(input: AnalyzeMealInput): Promise<GeminiMealAn
       error instanceof Error ? error.message : "Gemini meal analysis failed.",
       "The AI request failed. Please retry in a moment."
     );
+  }
+}
+
+const goalTargetsResponseSchema = Schema.object({
+  properties: {
+    calories: Schema.number({ description: "Daily calorie target in kcal, rounded to the nearest 50." }),
+    protein: Schema.number({ description: "Daily protein target in grams, rounded to the nearest 5." }),
+    carbs: Schema.number({ description: "Daily carbohydrate target in grams, rounded to the nearest 5." }),
+    fat: Schema.number({ description: "Daily fat target in grams, rounded to the nearest 5." })
+  }
+});
+
+const goalTargetsModel = getGenerativeModel(ai, {
+  model: "gemini-2.5-flash",
+  generationConfig: {
+    temperature: 0.2,
+    responseMimeType: "application/json",
+    responseSchema: goalTargetsResponseSchema
+  }
+});
+
+const activityLevelMeanings: Record<BodyProfile["activityLevel"], string> = {
+  sedentary: "sedentary (desk job, little exercise)",
+  moderate: "moderate activity (exercise 2-4x/week)",
+  active: "active (hard training 5+x/week)"
+};
+
+function goalTargetsPrompt(profile: BodyProfile, weightKg: number, goalText: string): string {
+  return [
+    "You are a precise sports-nutrition coach. Compute daily calorie and macronutrient targets for a person with this profile.",
+    `Height: ${profile.heightCm} cm`,
+    `Current weight: ${weightKg} kg`,
+    `Age: ${profile.age}`,
+    `Gender: ${profile.gender}`,
+    `Activity level: ${activityLevelMeanings[profile.activityLevel]}`,
+    `Their goal in their own words: "${goalText}". Interpret it carefully (rate of loss/gain, recomposition, sport-specific context) rather than applying a generic template.`,
+    "Ground the numbers in Mifflin-St Jeor TDEE math. Protein should be appropriate to the goal, roughly 1.6-2.2 g/kg bodyweight. Fat should be 20-30% of total calories. Carbs should be the remainder of calories after protein and fat.",
+    "Return JSON only matching the supplied schema."
+  ].join("\n");
+}
+
+export async function generateGoalTargets(profile: BodyProfile, weightKg: number, goalText: string): Promise<Goals> {
+  if (!isFirebaseConfigured()) {
+    return computeTargets(profile, weightKg, goalText);
+  }
+
+  try {
+    const result = await goalTargetsModel.generateContent(goalTargetsPrompt(profile, weightKg, goalText));
+    const data = JSON.parse(result.response.text());
+    const validated = goalTargetsSchema.parse(data);
+    return { ...validated, mode: goalText };
+  } catch (error) {
+    return computeTargets(profile, weightKg, goalText);
   }
 }
