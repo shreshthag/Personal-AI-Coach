@@ -7,7 +7,7 @@ running as a signed **release** build on a physical Android device (arm64) and e
 Gemini is wired up on the **paid (prepaid) Gemini API tier** and the AI coach, meal/weight
 logging, web search, and AI-computed goals are all verified working end to end on device.
 
-`npx tsc --noEmit` passes except for two known pre-existing errors (see Known Issues).
+`npx tsc --noEmit` passes clean.
 
 ## Architecture
 
@@ -93,22 +93,34 @@ logging, web search, and AI-computed goals are all verified working end to end o
 
 ## Known Issues / Tech Debt
 
-- Two pre-existing `tsc` errors remain (not introduced this session, not yet fixed):
-  - `src/repositories/weightRepository.ts` — `cacheWeights` not defined.
-  - `src/services/firebase/config.ts` — `getReactNativePersistence` not exported by `firebase/auth`
-    (currently using a `getAuth` fallback; Auth persistence upgrade still pending).
 - Coach errors surface as a generic "coach request failed" message — quota/billing errors (which
   include a retry-after hint) could be surfaced distinctly. Not yet done.
-- The unused `functions/` Gemini-proxy scaffold could be removed for clarity.
-- npm audit reported moderate dependency-tree vulnerabilities (app + functions) — not reviewed.
-- App icons / splash assets still to be added.
+- npm audit reported moderate dependency-tree vulnerabilities — not reviewed.
+- Splash assets still to be added (app icon is done — leaf + fork on a green field, see below).
+- **x86/x86_64 release build fails** on the `react-native-worklets` 0.10.1 native linker mismatch
+  (undefined `worklets::` symbols); worklets is pulled in transitively by both `expo-modules-core`
+  and `reanimated` (via nativewind). Decision: **stay arm64-only** — device + arm64 emulator build
+  cleanly and x86 emulators aren't used. Revisit only if x86 emulator release builds are needed.
+
+## Done — Fixes / Cleanup (This Session)
+
+- **Fixed both pre-existing `tsc` errors** — `tsc --noEmit` now passes clean:
+  - `weightRepository.ts` — `cacheWeights` was called but not imported; added it to the
+    `offlineCache` import (the function already existed).
+  - `config.ts` `getReactNativePersistence` — the RN build of `firebase/auth` exports it (Metro
+    resolves that at runtime), but the default type defs omit it. Added a module augmentation
+    (`src/types/firebase-auth.d.ts`) so tsc sees the export; **no runtime change**.
+- **Removed the unused `functions/` Gemini-proxy scaffold** — dir deleted, `functions` block dropped
+  from `firebase.json`, stale `functions/` lines removed from `.gitignore`. Nothing in `src`
+  imported it (app calls Gemini client-side directly).
+- **App icon** — leaf + fork mark on a green (`#2E9E5B`) field, generated at 1024px into `assets/`
+  (`icon.png` full-bleed + `adaptive-icon.png` transparent foreground). Wired into `app.config.ts`
+  (`icon` + `android.adaptiveIcon.foregroundImage`/`backgroundColor`). App name kept as
+  "AI Nutrition Tracker".
 
 ## Pending / Next Steps
 
-- Remove or repurpose the unused `functions/` proxy scaffold.
-- Fix the two pre-existing `tsc` errors (weightRepository cache import, Auth persistence).
 - Surface quota/billing/coach errors with actionable messaging + retry.
-- Add app icons and splash assets.
-- Resolve the x86 release native-link failure if emulator release builds are needed.
+- Add splash assets.
 - Generate a real release keystore before any distribution.
 - Review npm audit findings.

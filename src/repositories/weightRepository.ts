@@ -15,7 +15,7 @@ import type { DateKey, WeightEntry } from "../models/nutrition";
 import { db } from "../services/firebase/config";
 import { readBoolean, readNumber, readRecord } from "./firestoreParsers";
 import { isFirebaseConfigured } from "../services/config/env";
-import { saveWeightLocal, getWeightsLocal, deleteWeightLocal } from "../services/cache/offlineCache";
+import { saveWeightLocal, getWeightsLocal, deleteWeightLocal, cacheWeights } from "../services/cache/offlineCache";
 
 function weightsCollection(uid: string) {
   return collection(db, "users", uid, "weightEntries");

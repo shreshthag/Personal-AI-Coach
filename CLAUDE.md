@@ -4,6 +4,21 @@
 
 - **NEVER add `Co-Authored-By: Claude` (or any AI attribution / "Generated with Claude Code" trailer) to commit messages or PR descriptions.** Write commit messages as the user, with no Claude/Anthropic co-author line.
 
+## Building & Running the App (Android)
+
+Expo **dev-client** app, **Android only** (`ios/` is not generated). Verified setup for building/running on the emulator:
+
+- **Java:** there is no system JDK. Export `JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home"` (Android Studio's bundled JDK 21) for any gradle/expo build.
+- **SDK / emulator:** `ANDROID_HOME="$HOME/Library/Android/sdk"`. AVD is `Pixel_10_Pro` (arm64-v8a). Boot with `~/Library/Android/sdk/emulator/emulator -avd Pixel_10_Pro`, then wait until `adb shell getprop sys.boot_completed` returns `1`.
+- **Run:** `npx expo run:android` (debug). **Do NOT pass `--device emulator-5554`** — expo rejects the adb serial with "Could not find device with name"; with a single running emulator, omit the flag. Builds are **arm64-only** (see PLAN.md for the x86 `react-native-worklets` link failure).
+- **Dev launcher:** after install the app opens the Expo **DevLauncher**, not the app. Tap the dev-server row (`http://…:8081`) to load the JS bundle, and wait for `MainActivity` to resume before screenshotting. Metro must stay running on `:8081` for the debug build to load JS (`expo run:android` may exit after launch while leaving the dev server up).
+
+### Icon / `app.config.ts` native changes — prebuild gotcha
+
+- Changing `app.config.ts` (icon, adaptive icon, etc.) requires the `android/` native resources to be regenerated. **`expo run:android` does a non-destructive sync that does NOT regenerate the launcher icon** — the old icon persists no matter how many times you rebuild.
+- `npx expo prebuild --platform android` regenerates them, **but it does a full "Clearing android" wipe that clobbers hand-tweaked native files.** This repo has custom edits in `android/settings.gradle` (macOS node-path resolver), `android/build.gradle`, `android/app/build.gradle`, `android/gradlew`, `android/gradle/gradle-daemon-jvm.properties`. After a prebuild, **`git checkout` those non-icon files** and keep only the icon resources (`res/mipmap-*`, `res/mipmap-anydpi-v26/`, and the `iconBackground` color in `res/values/colors.xml`), then rebuild with `./gradlew :app:assembleDebug -PreactNativeArchitectures=arm64-v8a` directly — do not re-run prebuild.
+- **`google-services.json` is not used** — the google-services Gradle plugin is not applied; Firebase runs entirely via the JS SDK. A "missing google-services.json" is expected, not a problem (the `.gitignore` entry is defensive).
+
 ## Active Plans
 
 Claude Code auto-saves approved plans to `.claude/plans/` (configured via `plansDirectory` in settings.json). Filenames don't matter — they may be cryptic. What matters is the **content** of each plan. The active plan is tracked in `.claude/plans/.active`.

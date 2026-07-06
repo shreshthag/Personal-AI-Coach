@@ -8,10 +8,12 @@ const config: ExpoConfig = {
   userInterfaceStyle: "automatic",
   scheme: "ainutrition",
   backgroundColor: "#F8FAF7",
+  icon: "./assets/icon.png",
   android: {
     package: "com.personalainutrition.tracker",
     adaptiveIcon: {
-      backgroundColor: "#F8FAF7"
+      foregroundImage: "./assets/adaptive-icon.png",
+      backgroundColor: "#2E9E5B"
     },
     permissions: ["READ_MEDIA_IMAGES"]
   },

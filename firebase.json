@@ -4,12 +4,5 @@
   },
   "storage": {
     "rules": "storage.rules"
-  },
-  "functions": [
-    {
-      "source": "functions",
-      "codebase": "gemini-proxy",
-      "runtime": "nodejs22"
-    }
-  ]
+  }
 }
