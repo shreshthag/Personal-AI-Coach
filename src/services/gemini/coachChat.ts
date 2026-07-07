@@ -1,5 +1,5 @@
 import { FunctionCallingMode, Schema, getGenerativeModel } from "firebase/ai";
-import type { Content, FunctionCall, FunctionResponsePart } from "firebase/ai";
+import type { Content, FunctionCall, FunctionResponsePart, Part } from "firebase/ai";
 
 import type { CoachContext, CoachTurn } from "../../models/gemini";
 import { personaInstruction } from "../../constants/personas";
@@ -10,7 +10,7 @@ import { buildMealTotals } from "../../utils/nutrition";
 import { ai, simulateMealAnalysis } from "./geminiClient";
 
 export type CoachChatSession = {
-  send(request: string | FunctionResponsePart[]): Promise<CoachTurn>;
+  send(request: string | (string | Part)[]): Promise<CoachTurn>;
   getHistory(): Promise<Content[]>;
 };
 
@@ -159,7 +159,7 @@ function buildCoachSystemInstruction(context: CoachContext, today: DateKey): str
     "Never call a tool silently: whenever you propose an action, write a short natural reply in the same turn — react to what I said like a real coach would (acknowledge the food or weight, mention your estimate or a quick observation) before the confirmation card appears. A bare confirmation card with no words feels robotic.",
     "- update_goal: when I ask to change my calorie/macro targets or my phase (cutting, bulking, maintenance, etc.). Only include the fields that change — anything omitted keeps its current value. Also shown as a confirmation card before saving.",
     "- web_search: search Google for facts you don't reliably know. Runs automatically and returns a grounded answer — no confirmation card.",
-    "MODE: my goal carries a free-text mode describing my current phase (e.g. 'cutting', 'bulking', 'maintenance', 'recomp'). Use it to frame advice — a deficit mindset for cutting, a surplus mindset for bulking, and so on.",
+    "MODE: my goal carries a free-text mode describing my current phase (e.g. 'cutting', 'bulking', 'maintenance', 'recomp'). Use it to frame advice AND to decide whether the calorie target is a ceiling or a floor. Cutting: the target is a ceiling — help me stay at or under it. Bulking (a surplus phase): the target is a minimum, NOT a limit — hitting it or going a bit over is good, so never tell me to stay under it, never treat going over as a slip, and nudge me to eat more when I'm short. Treat whatever calorie target I've set as my chosen minimum and accept it as correct: even if it looks low for a bulk (say I set 1500), do NOT argue the number is wrong, too low, or 'not right for bulking', and do NOT recompute or suggest a different target unless I explicitly ask you to. Your only job in bulking is to encourage me to hit at least that number every day. Maintenance/recomp: aim to land near the target. This governs how you word 'calories remaining', 'within goal', and 'exceeded' everywhere below — apply the direction for my current mode.",
 
     "DAILY GREETING — on my first message of a new day only: greet me briefly, then summarize yesterday (calories consumed, calorie goal, calories remaining or exceeded, protein, carbs, fat, and weight if recorded) and the last 7 days (average calories, protein, carbs, fat, the weight trend, and how many days I stayed within my calorie goal). End with one blunt, no-excuses line that sets the tone for the day. Do not repeat this summary again unless I ask.",
 
@@ -167,9 +167,9 @@ function buildCoachSystemInstruction(context: CoachContext, today: DateKey): str
 
     "WEIGHT: when I give a weight, log it for today, then compare it with yesterday and last week and focus on the long-term trend — ignore normal day-to-day fluctuation.",
 
-    "GOALS: don't react to a single bad day. Look for patterns across at least 7 days. If I consistently exceed my goal, recommend a more realistic target and explain why; if I'm comfortably under it, suggest a lower one only if appropriate. Wait for my confirmation before treating any change as real.",
+    "GOALS: don't react to a single bad day. Look for patterns across at least 7 days. When cutting or maintaining: if I consistently exceed my goal, recommend a more realistic target and explain why; if I'm comfortably under it, suggest a lower one only if appropriate. When bulking: treat my set target as a minimum to hit — do NOT propose changing it (up or down) or debate whether the number is 'right for a bulk', even across a 7-day pattern, unless I explicitly ask; if I'm consistently short, just push me to reach it. Wait for my confirmation before treating any change as real.",
 
-    "ESTIMATES: assume food is Indian unless I say otherwise, and prefer Indian nutrition values. If the food or its quantity is unclear, ask instead of guessing, and state your assumptions. Round calories to the nearest 5 kcal and macros to the nearest gram. When confidence is low, ask before estimating. I enter food here as text; photo logging lives on the Log Meal screen.",
+    "ESTIMATES: assume food is Indian unless I say otherwise, and prefer Indian nutrition values. If the food or its quantity is unclear, ask instead of guessing, and state your assumptions. Round calories to the nearest 5 kcal and macros to the nearest gram. When confidence is low, ask before estimating. I can also attach a food photo right here in this chat — when I do, identify the foods in it, estimate calories and macros per item just as you would from a text description, and propose log_meal the same way, asking one quick question first only if the photo is unclear.",
 
     "WEB SEARCH: use the web_search tool when you need facts you don't reliably know — packaged or restaurant item nutrition, unfamiliar dishes, or current information. Prefer a quick search over a low-confidence guess, tell me briefly what you're checking when you call it, and mention when your numbers come from a search.",
 
@@ -306,12 +306,18 @@ function simulatedCoachText(normText: string): string {
 
 const foodKeywords = ["idli", "sambar", "dosa", "pizza", "apple"];
 
+// True only for a real FunctionResponsePart — plain strings and image/text parts
+// from a user turn (e.g. an attached photo) never have this field set.
+function isFunctionResponsePart(part: string | Part): part is FunctionResponsePart {
+  return typeof part !== "string" && part.functionResponse != null;
+}
+
 function createSimulatedCoachChatSession(context: CoachContext, today: DateKey): CoachChatSession {
   return {
     async send(request) {
       await new Promise((resolve) => setTimeout(resolve, 600));
 
-      if (Array.isArray(request)) {
+      if (Array.isArray(request) && request.every(isFunctionResponsePart)) {
         const allOk = request.every((part) => (part.functionResponse.response as { ok?: boolean }).ok === true);
         const isDelete = request.some(
           (part) => part.functionResponse.name === "delete_meal" || part.functionResponse.name === "delete_weight"
@@ -320,7 +326,16 @@ function createSimulatedCoachChatSession(context: CoachContext, today: DateKey):
         return { text, functionCalls: [] };
       }
 
-      const normText = request.toLowerCase();
+      // Non-FunctionResponsePart array (plain strings / text parts / image parts, or a
+      // mix) — derive a single text string to drive the same canned-response logic below.
+      const requestText = Array.isArray(request)
+        ? request
+            .map((part) => (typeof part === "string" ? part : typeof part.text === "string" ? part.text : ""))
+            .filter((text) => text.length > 0)
+            .join(" ")
+        : request;
+
+      const normText = requestText.toLowerCase();
 
       const isDeleteIntent = normText.includes("delete") || normText.includes("remove");
       if (isDeleteIntent) {
@@ -373,7 +388,7 @@ function createSimulatedCoachChatSession(context: CoachContext, today: DateKey):
 
       const matchedFoodKeyword = foodKeywords.find((keyword) => normText.includes(keyword));
       if (matchedFoodKeyword) {
-        const analysis = simulateMealAnalysis(request);
+        const analysis = simulateMealAnalysis(requestText);
         return {
           text: "Here's what I estimated — take a look and confirm if it's right.",
           functionCalls: [

@@ -8,6 +8,7 @@ import { useState, useCallback } from "react";
 import { AppText } from "../components/AppText";
 import { Button } from "../components/Button";
 import { Card } from "../components/Card";
+import { LoadingState } from "../components/LoadingState";
 import { MacroSummary } from "../components/MacroSummary";
 import { MetricCard } from "../components/MetricCard";
 import { Notice } from "../components/Notice";
@@ -33,7 +34,6 @@ export function DashboardScreen() {
   const meals = useDailyMeals(today);
   const weights = useWeightSummary(today);
   const weekly = useWeeklySummary(today);
-  const summary = buildDailySummary(today, meals.data ?? [], goals.data);
 
   const [refreshing, setRefreshing] = useState(false);
 
@@ -52,6 +52,16 @@ export function DashboardScreen() {
       setRefreshing(false);
     }
   }, [goals, meals, weights, weekly]);
+
+  if (!goals.data) {
+    return (
+      <ScreenShell refreshing={refreshing} onRefresh={onRefresh}>
+        <LoadingState label="Loading your goals..." />
+      </ScreenShell>
+    );
+  }
+
+  const summary = buildDailySummary(today, meals.data ?? [], goals.data);
 
   return (
     <ScreenShell refreshing={refreshing} onRefresh={onRefresh}>
@@ -118,23 +128,30 @@ export function DashboardScreen() {
         </View>
       </Card>
 
-      <Card className="gap-2" accessibilityLabel="Weekly Progress Summary">
-        <AppText variant="subtitle">Weekly progress</AppText>
-        <View className="flex-row justify-between" accessibilityLabel={`Average calories: ${formatCalories(weekly.data.averageCalories)}`}>
-          <AppText variant="caption">Average calories</AppText>
-          <AppText variant="label">{formatCalories(weekly.data.averageCalories)}</AppText>
-        </View>
-        <View className="flex-row justify-between" accessibilityLabel={`Goal adherence: ${weekly.data.goalAdherencePercent} percent`}>
-          <AppText variant="caption">Goal adherence</AppText>
-          <AppText variant="label">{weekly.data.goalAdherencePercent}%</AppText>
-        </View>
-        <View className="flex-row justify-between" accessibilityLabel={`Weight trend: ${weekly.data.weightTrendKg === null ? "Not enough data" : `${weekly.data.weightTrendKg.toFixed(1)} kilograms`}`}>
-          <AppText variant="caption">Weight trend</AppText>
-          <AppText variant="label">
-            {weekly.data.weightTrendKg === null ? "Not enough data" : `${weekly.data.weightTrendKg.toFixed(1)} kg`}
-          </AppText>
-        </View>
-      </Card>
+      {weekly.data ? (
+        <Card className="gap-2" accessibilityLabel="Weekly Progress Summary">
+          <AppText variant="subtitle">Weekly progress</AppText>
+          <View className="flex-row justify-between" accessibilityLabel={`Average calories: ${formatCalories(weekly.data.averageCalories)}`}>
+            <AppText variant="caption">Average calories</AppText>
+            <AppText variant="label">{formatCalories(weekly.data.averageCalories)}</AppText>
+          </View>
+          <View className="flex-row justify-between" accessibilityLabel={`Goal adherence: ${weekly.data.goalAdherencePercent} percent`}>
+            <AppText variant="caption">Goal adherence</AppText>
+            <AppText variant="label">{weekly.data.goalAdherencePercent}%</AppText>
+          </View>
+          <View className="flex-row justify-between" accessibilityLabel={`Weight trend: ${weekly.data.weightTrendKg === null ? "Not enough data" : `${weekly.data.weightTrendKg.toFixed(1)} kilograms`}`}>
+            <AppText variant="caption">Weight trend</AppText>
+            <AppText variant="label">
+              {weekly.data.weightTrendKg === null ? "Not enough data" : `${weekly.data.weightTrendKg.toFixed(1)} kg`}
+            </AppText>
+          </View>
+        </Card>
+      ) : (
+        <Card className="gap-2" accessibilityLabel="Weekly Progress Summary">
+          <AppText variant="subtitle">Weekly progress</AppText>
+          <LoadingState label="Loading weekly summary..." />
+        </Card>
+      )}
 
       {meals.error ? (
         <Notice tone="error" title="Meals not refreshed" message="Showing cached data if available. Pull this screen again once your connection is stable." />

@@ -49,7 +49,7 @@ export function OnboardingScreen() {
   const [age, setAge] = useState("");
   const [gender, setGender] = useState<Gender | null>(null);
   const [activityLevel, setActivityLevel] = useState<ActivityLevel | null>(null);
-  const [goalText, setGoalText] = useState(goals.data.mode);
+  const [goalText, setGoalText] = useState(goals.data?.mode ?? "");
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {

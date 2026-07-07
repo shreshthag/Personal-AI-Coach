@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import type { Content, FunctionResponsePart } from "firebase/ai";
+import type { Content, FunctionResponsePart, Part } from "firebase/ai";
 
 import type { CoachChatMessage, CoachContext, CoachGoalProposalData, CoachProposal, CoachTurn } from "../models/gemini";
 import { clearCoachChat, readCoachChat, saveCoachChat } from "../services/cache/coachChatCache";
@@ -45,6 +45,15 @@ function buildResponsePart(call: { id?: string; name: string }, response: object
       response
     }
   };
+}
+
+// Strips base64 image data out of chat history before it's persisted to AsyncStorage —
+// the live session object still keeps the real inlineData for continued conversation context.
+function sanitizeHistoryForPersistence(history: Content[]): Content[] {
+  return history.map((content) => ({
+    ...content,
+    parts: content.parts.map((part) => (part.inlineData ? { text: "[photo]" } : part))
+  }));
 }
 
 export function useCoachChat(getContext: () => CoachContext) {
@@ -122,7 +131,7 @@ export function useCoachChat(getContext: () => CoachContext) {
     void saveCoachChat(uid, {
       messages: messagesRef.current,
       proposals: proposalsRef.current,
-      history: historyRef.current
+      history: sanitizeHistoryForPersistence(historyRef.current)
     });
   }
 
@@ -423,19 +432,23 @@ export function useCoachChat(getContext: () => CoachContext) {
     }
   }
 
-  async function sendMessage(text: string): Promise<void> {
+  async function sendMessage(text: string, image?: { uri: string; base64: string; mimeType: string }): Promise<void> {
     if (statusRef.current !== "idle") {
       return;
     }
     const epoch = epochRef.current;
     sessionRef.current ??= createCoachChatSession(getContext(), toDateKey(), historyRef.current);
     const session = sessionRef.current;
-    applyMessages((prev) => [...prev, { id: createId("msg"), kind: "user", text }]);
+    const trimmed = text.trim();
+    const request: string | (string | Part)[] = image
+      ? [trimmed || "Here's a photo of what I ate.", { inlineData: { mimeType: image.mimeType, data: image.base64 } }]
+      : trimmed;
+    applyMessages((prev) => [...prev, { id: createId("msg"), kind: "user", text: trimmed, ...(image ? { imageUri: image.uri } : {}) }]);
     roundRef.current = 0;
     setError(null);
     applyStatus("waitingForModel");
     try {
-      const turn = await session.send(text);
+      const turn = await session.send(request);
       if (epoch !== epochRef.current) {
         return;
       }

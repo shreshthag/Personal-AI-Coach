@@ -14,8 +14,11 @@ export function useWeeklySummary(endDate: DateKey) {
 
   return useQuery({
     queryKey: uid ? queryKeys.weeklySummary(uid, endDate) : ["weeklySummary", "anonymous", endDate],
-    enabled: Boolean(uid),
-    queryFn: () => (uid ? getWeeklySummary(uid, endDate, goals.data) : Promise.resolve(buildWeeklySummary(endDate, {}, [], goals.data))),
-    initialData: buildWeeklySummary(endDate, {}, [], goals.data)
+    enabled: Boolean(uid) && Boolean(goals.data),
+    queryFn: () =>
+      uid && goals.data
+        ? getWeeklySummary(uid, endDate, goals.data)
+        : Promise.resolve(buildWeeklySummary(endDate, {}, [], goals.data)),
+    ...(goals.data ? { initialData: buildWeeklySummary(endDate, {}, [], goals.data) } : {})
   });
 }

@@ -6,6 +6,7 @@ import { Pressable, View } from "react-native";
 import { AppText } from "../components/AppText";
 import { Button } from "../components/Button";
 import { Card } from "../components/Card";
+import { LoadingState } from "../components/LoadingState";
 import { Notice } from "../components/Notice";
 import { ScreenShell } from "../components/ScreenShell";
 import { TextField } from "../components/TextField";
@@ -51,16 +52,19 @@ export function GoalsScreen({ navigation }: GoalsScreenProps) {
   const [error, setError] = useState<string | null>(null);
   const { control, handleSubmit, reset, setValue, getValues } = useForm<GoalsFormValues>({
     defaultValues: {
-      calories: String(goals.data.calories),
-      protein: String(goals.data.protein),
-      carbs: String(goals.data.carbs),
-      fat: String(goals.data.fat),
-      mode: goals.data.mode
+      calories: String(goals.data?.calories ?? 0),
+      protein: String(goals.data?.protein ?? 0),
+      carbs: String(goals.data?.carbs ?? 0),
+      fat: String(goals.data?.fat ?? 0),
+      mode: goals.data?.mode ?? ""
     }
   });
-  const lastBucket = useRef(classifyMode(goals.data.mode));
+  const lastBucket = useRef(classifyMode(goals.data?.mode ?? ""));
 
   useEffect(() => {
+    if (!goals.data) {
+      return;
+    }
     reset({
       calories: String(goals.data.calories),
       protein: String(goals.data.protein),
@@ -169,6 +173,14 @@ export function GoalsScreen({ navigation }: GoalsScreenProps) {
     } catch (saveError) {
       setError(toFriendlyError(saveError, "Could not save your coach. Please retry."));
     }
+  }
+
+  if (!goals.data) {
+    return (
+      <ScreenShell>
+        <LoadingState label="Loading your goals..." />
+      </ScreenShell>
+    );
   }
 
   return (

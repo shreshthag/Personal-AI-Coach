@@ -1,12 +1,15 @@
 import { useQuery } from "@tanstack/react-query";
+import * as ImagePicker from "expo-image-picker";
 import { useCallback, useRef, useState } from "react";
-import { ActivityIndicator, FlatList, Pressable, TextInput, View } from "react-native";
+import { ActivityIndicator, FlatList, Image, Pressable, TextInput, View } from "react-native";
 
 import { AppText } from "../components/AppText";
 import { Button } from "../components/Button";
 import { CoachProposalCard } from "../components/CoachProposalCard";
+import { LoadingState } from "../components/LoadingState";
 import { Notice } from "../components/Notice";
 import { ScreenShell } from "../components/ScreenShell";
+import { defaultGoals } from "../constants/defaults";
 import { defaultPersonaKey } from "../constants/personas";
 import { useCoachChat } from "../hooks/useCoach";
 import { useBodyProfile, useCoachSetup } from "../hooks/useUserProfile";
@@ -34,6 +37,7 @@ export function CoachScreen() {
   const setup = useCoachSetup();
   const profileQuery = useBodyProfile();
   const [draft, setDraft] = useState("");
+  const [attachedImage, setAttachedImage] = useState<{ uri: string; base64: string; mimeType: string } | null>(null);
   const listRef = useRef<FlatList<CoachChatMessage>>(null);
 
   const last7Meals = useQuery({
@@ -53,7 +57,8 @@ export function CoachScreen() {
     (): CoachContext => ({
       todayMeals: todayMeals.data ?? [],
       last7Days: last7Meals.data ?? [],
-      goals: goals.data,
+      // Fallback is unreachable: the screen returns a loading state below until goals.data exists.
+      goals: goals.data ?? defaultGoals,
       currentWeight: weights.data.find((entry) => entry.date === today) ?? weights.data.at(-1) ?? null,
       recentWeights: weights.data ?? [],
       userName: user?.displayName ?? null,
@@ -76,13 +81,38 @@ export function CoachScreen() {
   const { messages, proposals, status, sendMessage, confirmProposal, cancelProposal, resetChat } =
     useCoachChat(getContext);
 
-  function send() {
-    const trimmed = draft.trim();
-    if (!trimmed) {
+  if (!goals.data) {
+    return (
+      <ScreenShell scroll={false}>
+        <LoadingState label="Loading your coach..." />
+      </ScreenShell>
+    );
+  }
+
+  async function pickImage() {
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      quality: 0.75,
+      base64: true
+    });
+    if (result.canceled) {
       return;
     }
-    sendMessage(trimmed);
+    const asset = result.assets[0];
+    if (!asset?.uri || !asset.base64) {
+      return;
+    }
+    setAttachedImage({ uri: asset.uri, base64: asset.base64, mimeType: asset.mimeType ?? "image/jpeg" });
+  }
+
+  function send() {
+    const trimmed = draft.trim();
+    if (!trimmed && !attachedImage) {
+      return;
+    }
+    sendMessage(trimmed, attachedImage ?? undefined);
     setDraft("");
+    setAttachedImage(null);
   }
 
   function renderMessage({ item }: { item: CoachChatMessage }) {
@@ -102,9 +132,14 @@ export function CoachScreen() {
     if (item.kind === "user") {
       return (
         <View className="max-w-[85%] self-end rounded-2xl rounded-br-md bg-leaf px-4 py-2.5">
-          <AppText variant="body" className="text-white">
-            {item.text}
-          </AppText>
+          {item.imageUri ? (
+            <Image source={{ uri: item.imageUri }} className="mb-2 h-40 w-40 rounded-xl" resizeMode="cover" />
+          ) : null}
+          {item.text ? (
+            <AppText variant="body" className="text-white">
+              {item.text}
+            </AppText>
+          ) : null}
         </View>
       );
     }
@@ -172,7 +207,30 @@ export function CoachScreen() {
         }
       />
 
+      {attachedImage ? (
+        <View className="flex-row items-center gap-2" accessibilityLabel="Attached photo preview">
+          <Image source={{ uri: attachedImage.uri }} className="h-16 w-16 rounded-xl" resizeMode="cover" />
+          <Pressable
+            onPress={() => setAttachedImage(null)}
+            accessibilityRole="button"
+            accessibilityLabel="Remove attached photo"
+            className="rounded-full border border-zinc-200 px-3 py-1.5 dark:border-zinc-800"
+          >
+            <AppText variant="body">×</AppText>
+          </Pressable>
+        </View>
+      ) : null}
+
       <View className="flex-row items-end gap-2">
+        <Pressable
+          onPress={pickImage}
+          disabled={status !== "idle"}
+          accessibilityRole="button"
+          accessibilityLabel="Attach a food photo"
+          className="h-12 w-12 items-center justify-center rounded-2xl border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-950"
+        >
+          <AppText variant="body">📎</AppText>
+        </Pressable>
         <TextInput
           value={draft}
           onChangeText={setDraft}
@@ -189,7 +247,7 @@ export function CoachScreen() {
         />
         <Button
           title="Send"
-          disabled={status !== "idle" || draft.trim().length === 0}
+          disabled={status !== "idle" || (draft.trim().length === 0 && !attachedImage)}
           onPress={send}
           accessibilityLabel="Send message to your AI coach"
         />

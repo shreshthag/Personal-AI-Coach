@@ -15,8 +15,7 @@ export function useGoals() {
   return useQuery({
     queryKey: uid ? queryKeys.goals(uid) : ["goals", "anonymous"],
     enabled: Boolean(uid),
-    queryFn: () => (uid ? getGoals(uid) : Promise.resolve(defaultGoals)),
-    initialData: defaultGoals
+    queryFn: () => (uid ? getGoals(uid) : Promise.resolve(defaultGoals))
   });
 }
 

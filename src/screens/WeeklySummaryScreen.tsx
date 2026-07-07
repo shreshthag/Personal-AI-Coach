@@ -4,6 +4,7 @@ import { View } from "react-native";
 import { AppText } from "../components/AppText";
 import { Button } from "../components/Button";
 import { Card } from "../components/Card";
+import { LoadingState } from "../components/LoadingState";
 import { MetricCard } from "../components/MetricCard";
 import { ScreenShell } from "../components/ScreenShell";
 import { useWeeklySummary } from "../hooks/useWeeklySummary";
@@ -16,6 +17,15 @@ type WeeklySummaryScreenProps = NativeStackScreenProps<RootStackParamList, "Week
 export function WeeklySummaryScreen({ navigation }: WeeklySummaryScreenProps) {
   const today = toDateKey();
   const weekly = useWeeklySummary(today);
+
+  if (!weekly.data) {
+    return (
+      <ScreenShell>
+        <LoadingState label="Loading your weekly summary..." />
+      </ScreenShell>
+    );
+  }
+
   const summary = weekly.data;
 
   return (

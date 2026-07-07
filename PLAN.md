@@ -118,6 +118,36 @@ logging, web search, and AI-computed goals are all verified working end to end o
   (`icon` + `android.adaptiveIcon.foregroundImage`/`backgroundColor`). App name kept as
   "AI Nutrition Tracker".
 
+## Done — Coach Photos + Data Freshness (This Session)
+
+- **Attach food photos to the coach chat** (`CoachScreen.tsx`, `useCoach.ts`, `coachChat.ts`,
+  `models/gemini.ts`): a 📎 button in the composer opens the photo library (library only, matching
+  app design); the photo is sent to `gemini-2.5-flash` as an inline image part, so the coach
+  identifies the food, estimates per-item calories/macros, and proposes `log_meal` via the normal
+  confirmation card. The user bubble shows the thumbnail + optional caption. System prompt updated
+  (it previously said photo logging only lived on the Log Meal screen). Base64 image data is
+  **stripped from persisted chat history** (`sanitizeHistoryForPersistence`, replaced with `[photo]`)
+  so it can't bloat/break AsyncStorage; the live in-memory session keeps the real image.
+- **Bulking goal framing in the coach prompt** (MODE + GOALS rules): the calorie target is treated
+  as a **ceiling when cutting** and a **floor/minimum when bulking**. While bulking the coach never
+  tells you to stay under the target, accepts your set number as your chosen minimum (won't argue
+  it's "too low for a bulk" or recompute it unless asked), and nudges you to eat more when short.
+- **Data-freshness fixes** — the app showed stale/default values on open until a manual refresh:
+  - **Root cause**: queries seed `initialData` (e.g. `defaultGoals` = 2200 kcal / "cut"), and
+    React Query counts `initialData` as fresh, so with `staleTime: 60s` it **skipped the mount
+    fetch** and left the default on screen until pull-to-refresh.
+  - `App.tsx` bridges `AppState` → React Query `focusManager` (RN fires no window-focus event), so
+    returning to the foreground refetches stale queries.
+  - `App.tsx` sets `refetchOnMount: "always"`, so app open always refetches real values behind the
+    instant fallback.
+  - `useGoals` no longer seeds `defaultGoals`; Dashboard/Goals/Coach show a **loading state** (never
+    the 2200/cut default) until goals load, and the Dashboard main content no longer waits on the
+    slower weekly-summary query (only that section does). `useWeeklySummary` gates on goals;
+    `WeeklySummaryScreen`/`OnboardingScreen` handle the now-optional data.
+  - Note: the coach snapshots its context into the system prompt once at session creation (`??=`),
+    so a goal change *during* an open chat needs a new chat — left as-is on purpose to avoid
+    double-counting running meal totals (see CLAUDE.md gotchas).
+
 ## Pending / Next Steps
 
 - Surface quota/billing/coach errors with actionable messaging + retry.
