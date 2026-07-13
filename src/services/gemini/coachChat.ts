@@ -10,7 +10,7 @@ import { buildMealTotals } from "../../utils/nutrition";
 import { ai, simulateMealAnalysis } from "./geminiClient";
 
 export type CoachChatSession = {
-  send(request: string | (string | Part)[]): Promise<CoachTurn>;
+  send(request: string | (string | Part)[], onDelta?: (delta: string) => void): Promise<CoachTurn>;
   getHistory(): Promise<Content[]>;
 };
 
@@ -175,7 +175,7 @@ function buildCoachSystemInstruction(context: CoachContext, today: DateKey): str
 
     "COACHING: do more than log. Call out my eating patterns and high-calorie foods directly, stay on my protein intake, and push healthier swaps hard when I need them. Give me credit when I've genuinely earned it, but don't hand out empty praise — hold the line and tell me exactly what to fix next.",
 
-    "STYLE: keep replies concise and prefer short bullets over paragraphs. This chat renders plain text, so do NOT use Markdown tables or headings — lay out day or week summaries as simple aligned lines. Skip medical or physician disclaimers unless I specifically ask for medical advice.",
+    "STYLE: keep replies concise and prefer short bullets over paragraphs. Use **bold** for key numbers and - bullets for lists. Never use Markdown tables or headings. When a useful follow-up would help, end with [[chips: First option | Second option | Third option]] using at most 3 short choices. Do not add chips when a confirmation card is pending; it already has its own buttons. Skip medical or physician disclaimers unless I specifically ask for medical advice.",
 
     "MY DATA (use the ids and dates exactly when calling delete tools): the context now also includes my body profile (height cm, age, gender, activity level) — use it for advice and target math.",
     `Context JSON: ${contextJson}`
@@ -215,10 +215,20 @@ function createRealCoachChatSession(context: CoachContext, today: DateKey, histo
   const chat = model.startChat(history ? { history } : {});
 
   return {
-    async send(request) {
+    async send(request, onDelta) {
       try {
-        const result = await chat.sendMessage(request);
-        const response = result.response;
+        const result = await chat.sendMessageStream(request);
+        for await (const chunk of result.stream) {
+          try {
+            const delta = chunk.text();
+            if (delta) {
+              onDelta?.(delta);
+            }
+          } catch {
+            // Blocked/empty content — a chunk can throw for the same reason as the final response.
+          }
+        }
+        const response = await result.response;
 
         let text = "";
         try {
@@ -312,9 +322,20 @@ function isFunctionResponsePart(part: string | Part): part is FunctionResponsePa
   return typeof part !== "string" && part.functionResponse != null;
 }
 
+async function streamSimulatedTurn(turn: CoachTurn, onDelta?: (delta: string) => void): Promise<CoachTurn> {
+  if (!onDelta || !turn.text) {
+    return turn;
+  }
+  for (let index = 0; index < turn.text.length; index += 24) {
+    onDelta(turn.text.slice(index, index + 24));
+    await new Promise((resolve) => setTimeout(resolve, 24));
+  }
+  return turn;
+}
+
 function createSimulatedCoachChatSession(context: CoachContext, today: DateKey): CoachChatSession {
   return {
-    async send(request) {
+    async send(request, onDelta) {
       await new Promise((resolve) => setTimeout(resolve, 600));
 
       if (Array.isArray(request) && request.every(isFunctionResponsePart)) {
@@ -323,7 +344,7 @@ function createSimulatedCoachChatSession(context: CoachContext, today: DateKey):
           (part) => part.functionResponse.name === "delete_meal" || part.functionResponse.name === "delete_weight"
         );
         const text = !allOk ? "No problem, I won't log that." : isDelete ? "Removed that entry." : "Done — logged that for you!";
-        return { text, functionCalls: [] };
+        return streamSimulatedTurn({ text, functionCalls: [] }, onDelta);
       }
 
       // Non-FunctionResponsePart array (plain strings / text parts / image parts, or a
@@ -345,7 +366,7 @@ function createSimulatedCoachChatSession(context: CoachContext, today: DateKey):
           const matchedMeal = allMeals.find((meal) =>
             meal.foods.some((food) => food.name.toLowerCase().includes(matchedFoodKeyword))
           );
-          return {
+          return streamSimulatedTurn({
             text: "Sure — removing that.",
             functionCalls: [
               {
@@ -353,15 +374,15 @@ function createSimulatedCoachChatSession(context: CoachContext, today: DateKey):
                 args: { date: matchedMeal?.date ?? today, mealId: matchedMeal?.id ?? "sim-meal" }
               }
             ]
-          };
+          }, onDelta);
         }
 
         const hasWeightSignal = normText.includes("weight") || normText.includes("kg") || normText.includes("weigh");
         if (hasWeightSignal) {
-          return {
+          return streamSimulatedTurn({
             text: "Sure — removing that weight entry.",
             functionCalls: [{ name: "delete_weight", args: { date: today } }]
-          };
+          }, onDelta);
         }
       }
 
@@ -371,7 +392,7 @@ function createSimulatedCoachChatSession(context: CoachContext, today: DateKey):
       if (hasGoalSignal || matchedGoalModeKeyword) {
         const numberText = normText.match(/(\d+(?:\.\d+)?)/)?.[1];
         if (matchedGoalModeKeyword || numberText) {
-          return {
+          return streamSimulatedTurn({
             text: "Here's the updated goal — take a look and confirm if it's right.",
             functionCalls: [
               {
@@ -382,14 +403,14 @@ function createSimulatedCoachChatSession(context: CoachContext, today: DateKey):
                 }
               }
             ]
-          };
+          }, onDelta);
         }
       }
 
       const matchedFoodKeyword = foodKeywords.find((keyword) => normText.includes(keyword));
       if (matchedFoodKeyword) {
         const analysis = simulateMealAnalysis(requestText);
-        return {
+        return streamSimulatedTurn({
           text: "Here's what I estimated — take a look and confirm if it's right.",
           functionCalls: [
             {
@@ -402,7 +423,7 @@ function createSimulatedCoachChatSession(context: CoachContext, today: DateKey):
               }
             }
           ]
-        };
+        }, onDelta);
       }
 
       const hasWeightSignal = normText.includes("kg") || normText.includes("weigh") || normText.includes("weighed");
@@ -411,7 +432,7 @@ function createSimulatedCoachChatSession(context: CoachContext, today: DateKey):
         const rawValue = parseFloat(numberText);
         const isPounds = normText.includes("lbs") || normText.includes("pounds") || normText.includes("pound");
         const weightKg = Math.round((isPounds ? rawValue * 0.453592 : rawValue) * 10) / 10;
-        return {
+        return streamSimulatedTurn({
           text: "Got it — here's the weight entry, confirm if that's right.",
           functionCalls: [
             {
@@ -419,13 +440,13 @@ function createSimulatedCoachChatSession(context: CoachContext, today: DateKey):
               args: { date: today, weightKg }
             }
           ]
-        };
+        }, onDelta);
       }
 
-      return {
+      return streamSimulatedTurn({
         text: simulatedCoachText(normText),
         functionCalls: []
-      };
+      }, onDelta);
     },
     getHistory() {
       return Promise.resolve([]);

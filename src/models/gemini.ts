@@ -61,7 +61,8 @@ export type CoachProposal =
   | { id: string; callId?: string; tool: "update_goal"; status: CoachProposalStatus; goal: CoachGoalProposalData };
 
 export type CoachChatMessage =
-  | { id: string; kind: "user" | "coach" | "error"; text: string; imageUri?: string }
+  | { id: string; kind: "user" | "error"; text: string; imageUri?: string }
+  | { id: string; kind: "coach"; text: string; quickReplies?: string[]; streaming?: boolean }
   | { id: string; kind: "proposal"; proposalId: string };
 
 export type CoachTurn = {

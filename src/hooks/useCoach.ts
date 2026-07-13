@@ -56,6 +56,25 @@ function sanitizeHistoryForPersistence(history: Content[]): Content[] {
   }));
 }
 
+export function parseCoachText(raw: string): { text: string; chips: string[] } {
+  const markerIndex = raw.indexOf("[[");
+  if (markerIndex === -1) {
+    return { text: raw, chips: [] };
+  }
+  const marker = raw.slice(markerIndex);
+  const chipsValue = marker.match(/^\[\[chips:\s*([^\]]+)\]\]/i)?.[1];
+  return {
+    text: raw.slice(0, markerIndex).trimEnd(),
+    chips: chipsValue
+      ? chipsValue
+          .split("|")
+          .map((chip) => chip.trim())
+          .filter(Boolean)
+          .slice(0, 3)
+      : []
+  };
+}
+
 export function useCoachChat(getContext: () => CoachContext) {
   const { user } = useAuth();
   const uid = user?.uid;
@@ -77,6 +96,8 @@ export function useCoachChat(getContext: () => CoachContext) {
   const epochRef = useRef(0);
   const roundRef = useRef(0);
   const batchRef = useRef<PendingBatch | null>(null);
+  const streamMsgIdRef = useRef<string | null>(null);
+  const streamRawTextRef = useRef("");
 
   // Ref mirrors so async continuations always read/write the latest state
   // instead of a stale render closure.
@@ -135,14 +156,81 @@ export function useCoachChat(getContext: () => CoachContext) {
     });
   }
 
-  function appendCoachText(text: string): void {
-    if (text) {
-      applyMessages((prev) => [...prev, { id: createId("msg"), kind: "coach", text }]);
+  function beginStreamingTurn(): void {
+    streamMsgIdRef.current = null;
+    streamRawTextRef.current = "";
+  }
+
+  function handleStreamDelta(delta: string, epoch: number): void {
+    if (epoch !== epochRef.current) {
+      return;
     }
+    streamRawTextRef.current += delta;
+    const { text } = parseCoachText(streamRawTextRef.current);
+    if (!text) {
+      return;
+    }
+    if (!streamMsgIdRef.current) {
+      const id = createId("msg");
+      streamMsgIdRef.current = id;
+      applyMessages((prev) => [...prev, { id, kind: "coach", text, streaming: true }]);
+      return;
+    }
+    const id = streamMsgIdRef.current;
+    applyMessages((prev) =>
+      prev.map((message) => (message.id === id && message.kind === "coach" ? { ...message, text } : message))
+    );
+  }
+
+  function finalizeCoachText(raw: string): void {
+    const { text, chips } = parseCoachText(raw);
+    const streamMsgId = streamMsgIdRef.current;
+    streamMsgIdRef.current = null;
+    streamRawTextRef.current = "";
+
+    if (streamMsgId) {
+      if (!text) {
+        applyMessages((prev) => prev.filter((message) => message.id !== streamMsgId));
+        return;
+      }
+      applyMessages((prev) =>
+        prev.map((message) => {
+          if (message.id !== streamMsgId || message.kind !== "coach") {
+            return message;
+          }
+          const { streaming: _streaming, quickReplies: _quickReplies, ...settled } = message;
+          return { ...settled, text, ...(chips.length > 0 ? { quickReplies: chips } : {}) };
+        })
+      );
+      return;
+    }
+
+    if (text) {
+      applyMessages((prev) => [...prev, { id: createId("msg"), kind: "coach", text, ...(chips.length > 0 ? { quickReplies: chips } : {}) }]);
+    }
+  }
+
+  function clearStreamingMessage(): void {
+    const streamMsgId = streamMsgIdRef.current;
+    streamMsgIdRef.current = null;
+    streamRawTextRef.current = "";
+    if (!streamMsgId) {
+      return;
+    }
+    applyMessages((prev) =>
+      prev.map((message) => {
+        if (message.id !== streamMsgId || message.kind !== "coach") {
+          return message;
+        }
+        const { streaming: _streaming, ...settled } = message;
+        return settled;
+      })
+    );
   }
 
   function handleSendError(sendError: unknown, wasFlush: boolean): void {
     const friendly = toFriendlyError(sendError, "The coach could not respond. Please retry.");
+    clearStreamingMessage();
     applyMessages((prev) => [...prev, { id: createId("msg"), kind: "error", text: friendly }]);
     setError(friendly);
     if (wasFlush) {
@@ -173,7 +261,7 @@ export function useCoachChat(getContext: () => CoachContext) {
   }
 
   async function handleTurn(turn: CoachTurn, epoch: number, session: CoachChatSession): Promise<void> {
-    appendCoachText(turn.text);
+    finalizeCoachText(turn.text);
 
     if (turn.functionCalls.length === 0) {
       await finishTurn(epoch, session);
@@ -188,11 +276,12 @@ export function useCoachChat(getContext: () => CoachContext) {
         buildResponsePart(call, { ok: false, error: "Action limit reached, please try a simpler request." })
       );
       try {
-        const closing = await session.send(parts);
+        beginStreamingTurn();
+        const closing = await session.send(parts, (delta) => handleStreamDelta(delta, epoch));
         if (epoch !== epochRef.current) {
           return;
         }
-        appendCoachText(closing.text);
+        finalizeCoachText(closing.text);
       } catch (sendError) {
         if (epoch !== epochRef.current) {
           return;
@@ -419,7 +508,8 @@ export function useCoachChat(getContext: () => CoachContext) {
     roundRef.current += 1;
     applyStatus("waitingForModel");
     try {
-      const turn = await session.send(parts);
+      beginStreamingTurn();
+      const turn = await session.send(parts, (delta) => handleStreamDelta(delta, epoch));
       if (epoch !== epochRef.current) {
         return;
       }
@@ -448,7 +538,8 @@ export function useCoachChat(getContext: () => CoachContext) {
     setError(null);
     applyStatus("waitingForModel");
     try {
-      const turn = await session.send(request);
+      beginStreamingTurn();
+      const turn = await session.send(request, (delta) => handleStreamDelta(delta, epoch));
       if (epoch !== epochRef.current) {
         return;
       }
@@ -590,6 +681,8 @@ export function useCoachChat(getContext: () => CoachContext) {
     historyRef.current = [];
     batchRef.current = null;
     roundRef.current = 0;
+    streamMsgIdRef.current = null;
+    streamRawTextRef.current = "";
     applyMessages(() => []);
     applyProposals(() => ({}));
     setError(null);
