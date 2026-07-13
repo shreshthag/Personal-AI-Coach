@@ -27,6 +27,7 @@ const config: ExpoConfig = {
   plugins: [
     "expo-dev-client",
     "expo-image-picker",
+    "expo-speech-recognition",
     "@react-native-google-signin/google-signin"
   ],
   extra: {

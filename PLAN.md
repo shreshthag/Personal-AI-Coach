@@ -9,6 +9,17 @@ logging, web search, and AI-computed goals are all verified working end to end o
 
 `npx tsc --noEmit` passes clean.
 
+## In Progress — Coach Chat Voice, Streaming, Rich Text + Restyle
+
+- **Branch:** `feat/coach-chat-voice-streaming`
+- **Step 1 — native speech gate:** `expo-speech-recognition` 56.0.1 is installed and configured.
+  It compiled successfully against Expo SDK 57 / React Native 0.86 in an arm64 Android debug build.
+  The Android manifest includes package visibility for Google speech recognition and
+  `android.speech.RecognitionService`. The emulator does not expose a recognition service, so the
+  runtime voice smoke test remains for the physical Android device.
+- **Next:** implement streaming coach replies, rich text rendering, and quick-reply chips without
+  altering the existing coach epoch/batch machinery.
+
 ## Architecture
 
 - **Expo SDK 57 / React Native 0.86**, New Architecture enabled, edge-to-edge enabled.
