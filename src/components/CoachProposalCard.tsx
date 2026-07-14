@@ -44,8 +44,8 @@ export function CoachProposalCard({ proposal, onConfirm, onCancel }: CoachPropos
     <Card
       className={
         isDelete
-          ? "gap-3 border-clay/40 bg-orange-50 dark:border-clay/50 dark:bg-zinc-900"
-          : "gap-3 border-leaf/30 bg-mint dark:border-zinc-700 dark:bg-zinc-900"
+          ? "gap-3 rounded-[20px] border-clay/40 bg-orange-50 shadow-sm dark:border-clay/50 dark:bg-zinc-900"
+          : "gap-3 rounded-[20px] border-leaf/30 bg-mint shadow-sm dark:border-zinc-700 dark:bg-zinc-900"
       }
     >
       <View className="gap-1">
@@ -118,7 +118,7 @@ export function CoachProposalCard({ proposal, onConfirm, onCancel }: CoachPropos
           <Button
             title="Cancel"
             variant="ghost"
-            className="flex-1"
+            className="flex-1 rounded-full"
             disabled={proposal.status === "confirming"}
             onPress={onCancel}
             accessibilityLabel="Cancel this coach suggestion"
@@ -126,7 +126,7 @@ export function CoachProposalCard({ proposal, onConfirm, onCancel }: CoachPropos
           <Button
             title="Confirm"
             variant="primary"
-            className="flex-1"
+            className="flex-1 rounded-full"
             loading={proposal.status === "confirming"}
             onPress={onConfirm}
             accessibilityLabel="Confirm and log this coach suggestion"
