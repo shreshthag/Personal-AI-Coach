@@ -378,14 +378,14 @@ export function CoachScreen() {
           <AppText variant="body" className="flex-1 text-red-800 dark:text-red-200" numberOfLines={1}>
             {cancelArmed ? "Release to cancel" : voice.partialTranscript || "‹ Slide to cancel"}
           </AppText>
-          <Pressable
+          <View
             {...recordingResponder.panHandlers}
             accessibilityRole="button"
             accessibilityLabel="Release to finish voice input"
             className="h-12 w-12 items-center justify-center rounded-full bg-red-600"
           >
             <AppText variant="body" className="text-white">●</AppText>
-          </Pressable>
+          </View>
         </View>
       ) : (
         <View className="flex-row items-end gap-2">
@@ -423,15 +423,14 @@ export function CoachScreen() {
               <AppText variant="body" className="text-white">➤</AppText>
             </Pressable>
           ) : (
-            <Pressable
+            <View
               {...micResponder.panHandlers}
-              disabled={status !== "idle"}
               accessibilityRole="button"
               accessibilityLabel="Hold to record a voice message"
-              className="h-12 w-12 items-center justify-center rounded-full bg-leaf shadow-sm disabled:opacity-55"
+              className={`h-12 w-12 items-center justify-center rounded-full bg-leaf shadow-sm${status !== "idle" ? " opacity-55" : ""}`}
             >
               <AppText variant="body" className="text-white">🎙</AppText>
-            </Pressable>
+            </View>
           )}
         </View>
       )}
