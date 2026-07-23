@@ -10,6 +10,7 @@ export function useVoiceInput() {
   const [error, setError] = useState<string | null>(null);
   const recordingRef = useRef(false);
   const transcriptRef = useRef("");
+  const finalTranscriptRef = useRef("");
   const stopResolverRef = useRef<StopResolver | null>(null);
   const cancelRef = useRef(false);
   const requestIdRef = useRef(0);
@@ -23,9 +24,14 @@ export function useVoiceInput() {
   }, []);
 
   useSpeechRecognitionEvent("result", (event) => {
-    const transcript = event.results[0]?.transcript ?? "";
-    transcriptRef.current = transcript;
-    setPartialTranscript(transcript);
+    const segment = event.results[0]?.transcript ?? "";
+    if (event.isFinal) {
+      finalTranscriptRef.current = [finalTranscriptRef.current, segment].filter(Boolean).join(" ");
+      transcriptRef.current = finalTranscriptRef.current;
+    } else {
+      transcriptRef.current = [finalTranscriptRef.current, segment].filter(Boolean).join(" ");
+    }
+    setPartialTranscript(transcriptRef.current);
   });
 
   useSpeechRecognitionEvent("end", () => {
@@ -73,12 +79,13 @@ export function useVoiceInput() {
     }
     cancelRef.current = false;
     transcriptRef.current = "";
+    finalTranscriptRef.current = "";
     setPartialTranscript("");
     setSeconds(0);
     recordingRef.current = true;
     setRecording(true);
     try {
-      ExpoSpeechRecognitionModule.start({ lang: "en-IN", interimResults: true, continuous: false });
+      ExpoSpeechRecognitionModule.start({ lang: "en-IN", interimResults: true, continuous: true });
       return true;
     } catch (startError) {
       recordingRef.current = false;
@@ -91,7 +98,7 @@ export function useVoiceInput() {
   const stop = useCallback(() => {
     requestIdRef.current += 1;
     if (!recordingRef.current) {
-      return Promise.resolve("");
+      return Promise.resolve(cancelRef.current ? "" : transcriptRef.current);
     }
     return new Promise<string>((resolve) => {
       stopResolverRef.current = resolve;
