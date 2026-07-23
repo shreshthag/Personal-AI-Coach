@@ -72,12 +72,13 @@ export function DashboardScreen() {
         </View>
         <Pressable
           onPress={() => navigation.navigate("Goals")}
-          className="rounded-full border border-leaf/30 bg-mint px-3 py-1.5 dark:bg-zinc-900"
+          className="flex-row items-center gap-1 rounded-full border border-leaf/30 bg-mint px-3 py-1.5 dark:border-leaf/60 dark:bg-leaf/20"
           accessibilityLabel="Current goal mode — open goals"
         >
           <AppText variant="caption">
             {goals.data.mode.charAt(0).toUpperCase() + goals.data.mode.slice(1)}
           </AppText>
+          <AppText variant="caption">›</AppText>
         </Pressable>
       </View>
 
