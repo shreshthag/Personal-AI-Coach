@@ -39,7 +39,7 @@ function formatSeconds(seconds: number): string {
 
 export function CoachScreen() {
   const today = toDateKey();
-  const dates = lastDateKeys(7, today);
+  const dates = lastDateKeys(8, today);
   const { user } = useAuth();
   const goals = useGoals();
   const todayMeals = useDailyMeals(today);
@@ -54,7 +54,7 @@ export function CoachScreen() {
   const listRef = useRef<FlatList<CoachChatMessage>>(null);
   const recordHoldRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const last7Meals = useQuery({
+  const recentMeals = useQuery({
     queryKey: user ? ["coachMeals", user.uid, today] : ["coachMeals", "anonymous", today],
     enabled: Boolean(user),
     queryFn: async () => {
@@ -70,7 +70,7 @@ export function CoachScreen() {
   const getContext = useCallback(
     (): CoachContext => ({
       todayMeals: todayMeals.data ?? [],
-      last7Days: last7Meals.data ?? [],
+      recentMeals: recentMeals.data ?? [],
       // Fallback is unreachable: the screen returns a loading state below until goals.data exists.
       goals: goals.data ?? defaultGoals,
       currentWeight: weights.data.find((entry) => entry.date === today) ?? weights.data.at(-1) ?? null,
@@ -82,7 +82,7 @@ export function CoachScreen() {
     }),
     [
       todayMeals.data,
-      last7Meals.data,
+      recentMeals.data,
       goals.data,
       weights.data,
       today,

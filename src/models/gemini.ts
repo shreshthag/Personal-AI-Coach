@@ -9,7 +9,8 @@ export type GeminiMealAnalysis = {
 
 export type CoachContext = {
   todayMeals: Meal[];
-  last7Days: Meal[];
+  // 8 days ending today — the extra day lets the coach average 7 completed days without today's partial one.
+  recentMeals: Meal[];
   goals: Goals;
   currentWeight: WeightEntry | null;
   recentWeights: WeightEntry[];

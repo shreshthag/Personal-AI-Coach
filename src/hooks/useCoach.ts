@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { Content, FunctionResponsePart, Part } from "firebase/ai";
 
 import type { CoachChatMessage, CoachContext, CoachGoalProposalData, CoachProposal, CoachTurn } from "../models/gemini";
+import type { DateKey } from "../models/nutrition";
 import { clearCoachChat, readCoachChat, saveCoachChat } from "../services/cache/coachChatCache";
 import { createCoachChatSession, runWebSearch, type CoachChatSession } from "../services/gemini/coachChat";
 import {
@@ -12,7 +13,7 @@ import {
   updateGoalArgsSchema,
   webSearchArgsSchema
 } from "../services/gemini/schemas";
-import { toDateKey } from "../utils/date";
+import { toClockTime, toDateKey } from "../utils/date";
 import { toFriendlyError } from "../utils/errors";
 import { createId } from "../utils/id";
 import { buildMealTotals, computeTargets } from "../utils/nutrition";
@@ -32,6 +33,10 @@ type PendingBatch = {
   // rebuild the parts in the original call order regardless of resolution order.
   responses: Map<number, FunctionResponsePart>;
   slotByProposalId: Map<string, number>;
+  // True when the batch contains an auto-executing call (web_search / delete_*): the model
+  // needs those results to continue, so such a batch keeps the old blocking flush. A batch of
+  // only user-confirmable proposals resolves lazily and never triggers a model turn on its own.
+  autoFlush: boolean;
 };
 
 function buildResponsePart(call: { id?: string; name: string }, response: object): FunctionResponsePart {
@@ -54,6 +59,26 @@ function sanitizeHistoryForPersistence(history: Content[]): Content[] {
     ...content,
     parts: content.parts.map((part) => (part.inlineData ? { text: "[photo]" } : part))
   }));
+}
+
+function describeProposalOutcome(proposal: CoachProposal): string {
+  if (proposal.status === "confirmed") {
+    if (proposal.tool === "log_meal") {
+      const totals = buildMealTotals(proposal.meal.foods);
+      const items = proposal.meal.foods.map((food) => `${food.name} (${food.quantity})`).join(", ");
+      return `Logged ${proposal.meal.mealType} on ${proposal.meal.date}: ${items} — ${totals.totalCalories} kcal, ${totals.totalProtein} g protein, ${totals.totalCarbs} g carbs, ${totals.totalFat} g fat.`;
+    }
+    if (proposal.tool === "log_weight") {
+      return `Logged weight ${proposal.weight.weightKg} kg on ${proposal.weight.date}.`;
+    }
+    if (proposal.tool === "update_goal") {
+      return `Goal updated to ${proposal.goal.calories} kcal, ${proposal.goal.protein} g protein, ${proposal.goal.carbs} g carbs, ${proposal.goal.fat} g fat, mode ${proposal.goal.mode}.`;
+    }
+  }
+  if (proposal.status === "failed") {
+    return `Saving your ${proposal.tool} suggestion failed — nothing was saved.`;
+  }
+  return `The user dismissed your ${proposal.tool} suggestion — nothing was saved.`;
 }
 
 export function parseCoachText(raw: string): { text: string; chips: string[] } {
@@ -91,11 +116,20 @@ export function useCoachChat(getContext: () => CoachContext) {
 
   const sessionRef = useRef<CoachChatSession | null>(null);
   const historyRef = useRef<Content[]>([]);
+  // The system instruction bakes in the date, so a session built yesterday would log
+  // today's meals against the wrong day — rebuild it when the day rolls over.
+  const sessionDateRef = useRef<DateKey | null>(null);
+  const lastActiveDateRef = useRef<DateKey | null>(null);
   // Bumped by resetChat; async continuations capture the epoch at start and
   // bail if it changed, so a mid-flight reset can never resurrect stale state.
   const epochRef = useRef(0);
   const roundRef = useRef(0);
   const batchRef = useRef<PendingBatch | null>(null);
+  // Outcomes of pills the user resolved (or walked away from) since the last message.
+  // These ride along as text, not as functionResponse parts: the SDK rejects a message that
+  // mixes a FunctionResponse with any other part, and Gemini is happy to accept a plain user
+  // turn while an earlier functionCall sits unanswered.
+  const pendingOutcomesRef = useRef<string[]>([]);
   const streamMsgIdRef = useRef<string | null>(null);
   const streamRawTextRef = useRef("");
 
@@ -139,7 +173,16 @@ export function useCoachChat(getContext: () => CoachContext) {
             ? { ...proposal, status: "declined" }
             : proposal;
       }
-      historyRef.current = snapshot.history;
+      // A trailing model turn with an unanswered function call can't be resumed — the
+      // responses lived in memory and died with the process. Drop it so the restored
+      // session starts from a clean turn boundary.
+      const restoredHistory = snapshot.history.filter((content, index) => {
+        const isLast = index === snapshot.history.length - 1;
+        return !(isLast && content.parts.some((part) => part.functionCall != null));
+      });
+      historyRef.current = restoredHistory;
+      lastActiveDateRef.current = snapshot.lastActiveDate ?? null;
+      pendingOutcomesRef.current = snapshot.pendingOutcomes ?? [];
       applyMessages(() => snapshot.messages);
       applyProposals(() => restoredProposals);
     });
@@ -152,7 +195,9 @@ export function useCoachChat(getContext: () => CoachContext) {
     void saveCoachChat(uid, {
       messages: messagesRef.current,
       proposals: proposalsRef.current,
-      history: sanitizeHistoryForPersistence(historyRef.current)
+      history: sanitizeHistoryForPersistence(historyRef.current),
+      ...(lastActiveDateRef.current ? { lastActiveDate: lastActiveDateRef.current } : {}),
+      ...(pendingOutcomesRef.current.length > 0 ? { pendingOutcomes: pendingOutcomesRef.current } : {})
     });
   }
 
@@ -297,7 +342,8 @@ export function useCoachChat(getContext: () => CoachContext) {
     const batch: PendingBatch = {
       calls: turn.functionCalls,
       responses: new Map(),
-      slotByProposalId: new Map()
+      slotByProposalId: new Map(),
+      autoFlush: false
     };
     const context = getContext();
     const autoExecuteIds: string[] = [];
@@ -345,10 +391,11 @@ export function useCoachChat(getContext: () => CoachContext) {
           );
         }
       } else if (call.name === "delete_meal") {
+        batch.autoFlush = true;
         const parsed = deleteMealArgsSchema.safeParse(call.args);
         const meal = parsed.success
           ? (context.todayMeals.find((item) => item.id === parsed.data.mealId && item.date === parsed.data.date) ??
-              context.last7Days.find((item) => item.id === parsed.data.mealId && item.date === parsed.data.date))
+              context.recentMeals.find((item) => item.id === parsed.data.mealId && item.date === parsed.data.date))
           : undefined;
         if (parsed.success && meal) {
           const proposalId = createId("proposal");
@@ -377,6 +424,7 @@ export function useCoachChat(getContext: () => CoachContext) {
           batch.responses.set(index, buildResponsePart(call, { ok: false, error: "That meal isn't in your recent data." }));
         }
       } else if (call.name === "delete_weight") {
+        batch.autoFlush = true;
         const parsed = deleteWeightArgsSchema.safeParse(call.args);
         const weight = parsed.success
           ? (context.recentWeights.find((entry) => entry.date === parsed.data.date) ??
@@ -446,6 +494,7 @@ export function useCoachChat(getContext: () => CoachContext) {
           );
         }
       } else if (call.name === "web_search") {
+        batch.autoFlush = true;
         const parsed = webSearchArgsSchema.safeParse(call.args);
         if (parsed.success) {
           // Auto-executes with no proposal card; the flush waits until the
@@ -483,7 +532,7 @@ export function useCoachChat(getContext: () => CoachContext) {
 
     batchRef.current = batch;
 
-    if (pendingCount > 0) {
+    if (pendingCount > 0 && batch.autoFlush) {
       applyStatus("awaitingConfirmation");
     }
 
@@ -495,6 +544,12 @@ export function useCoachChat(getContext: () => CoachContext) {
       // Every call resolved immediately (validation/unknown-tool failures) — no
       // user action to wait for, flush right away.
       await maybeFlushBatch(epoch, session);
+    }
+
+    if (pendingCount > 0 && !batch.autoFlush) {
+      // Pure-proposal batch: the pill is on screen and the user can keep chatting. The
+      // function responses stay in batchRef and ride along with their next message.
+      await finishTurn(epoch, session);
     }
   }
 
@@ -522,17 +577,55 @@ export function useCoachChat(getContext: () => CoachContext) {
     }
   }
 
+  // Marks anything the user never answered as dismissed and drains the notes for sending.
+  function harvestPendingOutcomes(): string[] {
+    const batch = batchRef.current;
+    if (batch && !batch.autoFlush) {
+      batch.slotByProposalId.forEach((_slot, proposalId) => {
+        const proposal = proposalsRef.current[proposalId];
+        if (proposal && proposal.status === "pending") {
+          applyProposals((prev) => ({ ...prev, [proposalId]: { ...prev[proposalId], status: "declined" } as CoachProposal }));
+          pendingOutcomesRef.current = [
+            ...pendingOutcomesRef.current,
+            describeProposalOutcome({ ...proposal, status: "declined" } as CoachProposal)
+          ];
+        }
+      });
+      batchRef.current = null;
+    }
+    const outcomes = pendingOutcomesRef.current;
+    pendingOutcomesRef.current = [];
+    return outcomes;
+  }
+
   async function sendMessage(text: string, image?: { uri: string; base64: string; mimeType: string }): Promise<void> {
     if (statusRef.current !== "idle") {
       return;
     }
     const epoch = epochRef.current;
-    sessionRef.current ??= createCoachChatSession(getContext(), toDateKey(), historyRef.current);
+    const today = toDateKey();
+    if (sessionDateRef.current !== null && sessionDateRef.current !== today) {
+      // Day rolled over mid-conversation — drop the session so the next one carries today's date.
+      sessionRef.current = null;
+    }
+    sessionRef.current ??= createCoachChatSession(getContext(), {
+      today,
+      now: toClockTime(),
+      isFirstMessageOfDay: lastActiveDateRef.current !== today,
+      history: historyRef.current
+    });
+    sessionDateRef.current = today;
+    lastActiveDateRef.current = today;
     const session = sessionRef.current;
     const trimmed = text.trim();
+    const outcomes = harvestPendingOutcomes();
+    const prefix =
+      outcomes.length > 0
+        ? `[App events since your last message — these already happened, do not repeat them: ${outcomes.join(" ")}]\n\n`
+        : "";
     const request: string | (string | Part)[] = image
-      ? [trimmed || "Here's a photo of what I ate.", { inlineData: { mimeType: image.mimeType, data: image.base64 } }]
-      : trimmed;
+      ? [`${prefix}${trimmed || "Here's a photo of what I ate."}`, { inlineData: { mimeType: image.mimeType, data: image.base64 } }]
+      : `${prefix}${trimmed}`;
     applyMessages((prev) => [...prev, { id: createId("msg"), kind: "user", text: trimmed, ...(image ? { imageUri: image.uri } : {}) }]);
     roundRef.current = 0;
     setError(null);
@@ -645,7 +738,18 @@ export function useCoachChat(getContext: () => CoachContext) {
       applyMessages((prev) => [...prev, { id: createId("msg"), kind: "error", text: friendly }]);
       batch.responses.set(slot, buildResponsePart(call, { ok: false, error: friendly }));
     }
-    await maybeFlushBatch(epoch, session);
+    if (batch.autoFlush) {
+      await maybeFlushBatch(epoch, session);
+      return;
+    }
+    const resolved = proposalsRef.current[proposalId];
+    if (resolved) {
+      pendingOutcomesRef.current = [...pendingOutcomesRef.current, describeProposalOutcome(resolved)];
+    }
+    // A pure-proposal batch triggers no model turn, so nothing else will persist the
+    // resolved pill — without this, a kill before the next message would restore a
+    // meal that really was logged as a dismissed suggestion.
+    persistSnapshot();
   }
 
   async function confirmProposal(proposalId: string): Promise<void> {
@@ -672,15 +776,23 @@ export function useCoachChat(getContext: () => CoachContext) {
       slot,
       buildResponsePart(call, { ok: false, declined: true, reason: "The user declined this action." })
     );
-    await maybeFlushBatch(epoch, session);
+    if (batch.autoFlush) {
+      await maybeFlushBatch(epoch, session);
+      return;
+    }
+    pendingOutcomesRef.current = [...pendingOutcomesRef.current, describeProposalOutcome(proposalsRef.current[proposalId] as CoachProposal)];
+    persistSnapshot();
   }
 
   function resetChat(): void {
     epochRef.current += 1;
     sessionRef.current = null;
+    sessionDateRef.current = null;
+    // lastActiveDateRef intentionally survives a reset: the daily briefing is once per day, not once per chat.
     historyRef.current = [];
     batchRef.current = null;
     roundRef.current = 0;
+    pendingOutcomesRef.current = [];
     streamMsgIdRef.current = null;
     streamRawTextRef.current = "";
     applyMessages(() => []);
