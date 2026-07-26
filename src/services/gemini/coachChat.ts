@@ -221,13 +221,13 @@ function buildCoachDerived(context: CoachContext, today: DateKey) {
 // day part and the default meal type are resolved here instead of left to the model.
 function describeTimeOfDay(now: string): { dayPart: string; defaultMealType: MealType } {
   const hour = Number(now.slice(0, 2));
-  if (hour < 11) {
+  if (hour > 6 && hour < 13) {
     return { dayPart: "morning", defaultMealType: "breakfast" };
   }
-  if (hour < 16) {
+  if (hour < 18) {
     return { dayPart: "afternoon", defaultMealType: "lunch" };
   }
-  if (hour < 21) {
+  if (hour < 23) {
     return { dayPart: "evening", defaultMealType: "dinner" };
   }
   return { dayPart: "night", defaultMealType: "snack" };
