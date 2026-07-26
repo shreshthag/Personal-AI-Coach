@@ -3,15 +3,24 @@ import type { Content, FunctionCall, FunctionResponsePart, Part } from "firebase
 
 import type { CoachContext, CoachTurn } from "../../models/gemini";
 import { personaInstruction } from "../../constants/personas";
-import type { DateKey, MealType } from "../../models/nutrition";
+import type { DateKey, Goals, Meal, MealType } from "../../models/nutrition";
 import { isFirebaseConfigured } from "../config/env";
 import { AppError } from "../../utils/errors";
-import { buildMealTotals } from "../../utils/nutrition";
+import { buildDailySummary, buildMealTotals, buildWeightSummary, classifyMode, roundMacro, sumMeals } from "../../utils/nutrition";
+import { lastDateKeys } from "../../utils/date";
 import { ai, simulateMealAnalysis } from "./geminiClient";
 
 export type CoachChatSession = {
-  send(request: string | (string | Part)[]): Promise<CoachTurn>;
+  send(request: string | (string | Part)[], onDelta?: (delta: string) => void): Promise<CoachTurn>;
   getHistory(): Promise<Content[]>;
+};
+
+export type CoachSessionOptions = {
+  today: DateKey;
+  // Local clock time "HH:MM" — lets the coach infer which meal an unlabelled log belongs to.
+  now: string;
+  isFirstMessageOfDay: boolean;
+  history?: Content[];
 };
 
 const logMealDeclaration = {
@@ -123,62 +132,224 @@ const updateGoalDeclaration = {
   })
 };
 
-function buildCoachSystemInstruction(context: CoachContext, today: DateKey): string {
-  const slimLast7Days = context.last7Days.map((meal) => ({
-    id: meal.id,
-    date: meal.date,
-    mealType: meal.mealType,
-    totals: buildMealTotals(meal.foods),
-    foods: meal.foods.map((food) => ({ name: food.name, quantity: food.quantity }))
-  }));
+type CoachDayTotals = {
+  date: DateKey;
+  calories: number;
+  protein: number;
+  carbs: number;
+  fat: number;
+  mealCount: number;
+  hitCalorieGoal: boolean;
+};
 
-  const contextJson = JSON.stringify({
-    goals: context.goals,
+// "Hit" follows the direction the phase implies — a ceiling when cutting or maintaining,
+// a floor when bulking — so the coach never has to reinterpret the comparison itself.
+function buildDayTotals(date: DateKey, meals: Meal[], goals: Goals): CoachDayTotals {
+  const totals = sumMeals(meals);
+  const hitCalorieGoal =
+    meals.length > 0 &&
+    (classifyMode(goals.mode) === "bulk" ? totals.calories >= goals.calories : totals.calories <= goals.calories);
+  return { date, ...totals, mealCount: meals.length, hitCalorieGoal };
+}
+
+function averageOf(values: number[]): number | null {
+  if (values.length === 0) {
+    return null;
+  }
+  return roundMacro(values.reduce((sum, value) => sum + value, 0) / values.length);
+}
+
+// Every figure the coach would otherwise have to get by re-adding the raw meal lists.
+// Flash is unreliable at that arithmetic, so the prompt hands it finished numbers instead.
+function buildCoachDerived(context: CoachContext, today: DateKey) {
+  const goals = context.goals;
+  const mealsByDate = new Map<DateKey, Meal[]>();
+  for (const meal of context.recentMeals) {
+    mealsByDate.set(meal.date, [...(mealsByDate.get(meal.date) ?? []), meal]);
+  }
+
+  // Today is excluded so a partial day never drags the averages down.
+  const previousDates = lastDateKeys(8, today).filter((date) => date !== today);
+  const perDay = previousDates.map((date) => buildDayTotals(date, mealsByDate.get(date) ?? [], goals));
+  const trackedDays = perDay.filter((day) => day.mealCount > 0);
+
+  const weightSummary = buildWeightSummary(today, context.recentWeights);
+  const sortedWeights = [...context.recentWeights].sort((a, b) => a.date.localeCompare(b.date));
+  const latestWeight = sortedWeights.at(-1) ?? null;
+  const previousWeight = sortedWeights.at(-2) ?? null;
+
+  return {
+    calorieGoalRule:
+      classifyMode(goals.mode) === "bulk"
+        ? "bulking: the calorie target is a floor — a day counts as hit at or above it"
+        : "cutting/maintenance: the calorie target is a ceiling — a day counts as hit at or under it",
+    today: buildDailySummary(today, context.todayMeals, goals),
+    yesterday: perDay.at(-1) ?? null,
+    previous7Days: {
+      startDate: previousDates[0],
+      endDate: previousDates.at(-1),
+      perDay,
+      daysTracked: trackedDays.length,
+      daysHitCalorieGoal: perDay.filter((day) => day.hitCalorieGoal).length,
+      // Both framings are handed over because "7-day average" is ambiguous, and the model
+      // will compute whichever one it is missing rather than leave it out.
+      averagesPerCalendarDay: {
+        calories: averageOf(perDay.map((day) => day.calories)),
+        protein: averageOf(perDay.map((day) => day.protein)),
+        carbs: averageOf(perDay.map((day) => day.carbs)),
+        fat: averageOf(perDay.map((day) => day.fat))
+      },
+      averagesPerTrackedDay: {
+        calories: averageOf(trackedDays.map((day) => day.calories)),
+        protein: averageOf(trackedDays.map((day) => day.protein)),
+        carbs: averageOf(trackedDays.map((day) => day.carbs)),
+        fat: averageOf(trackedDays.map((day) => day.fat))
+      }
+    },
+    weight: {
+      latest: latestWeight,
+      previousEntry: previousWeight,
+      changeVsPreviousEntryKg:
+        latestWeight && previousWeight ? roundMacro(latestWeight.weightKg - previousWeight.weightKg) : null,
+      changeOverWindowKg: weightSummary.changeThisWeekKg,
+      sevenDayAverageKg: weightSummary.sevenDayAverageKg
+    }
+  };
+}
+
+// Flash does not reliably map a clock string onto a meal window or a greeting, so the
+// day part and the default meal type are resolved here instead of left to the model.
+function describeTimeOfDay(now: string): { dayPart: string; defaultMealType: MealType } {
+  const hour = Number(now.slice(0, 2));
+  if (hour < 11) {
+    return { dayPart: "morning", defaultMealType: "breakfast" };
+  }
+  if (hour < 16) {
+    return { dayPart: "afternoon", defaultMealType: "lunch" };
+  }
+  if (hour < 21) {
+    return { dayPart: "evening", defaultMealType: "dinner" };
+  }
+  return { dayPart: "night", defaultMealType: "snack" };
+}
+
+function coachObjective(mode: string): string {
+  const bucket = classifyMode(mode);
+  if (bucket === "bulk") {
+    return "help me gain weight steadily without letting food quality or protein slip";
+  }
+  if (bucket === "cut") {
+    return "help me lose fat in a sustainable way";
+  }
+  return "help me hold my weight steady and keep improving my body composition";
+}
+
+// Marks the start of the per-turn data block. Exported so the simulated session can strip it
+// before keyword-matching, and so the block's end can be located unambiguously ("]\n\n" cannot
+// occur inside it because JSON.stringify emits no newlines).
+export const COACH_DATA_BLOCK_START = "[MY DATA";
+
+export function buildCoachDataBlock(context: CoachContext, today: DateKey, now: string): string {
+  const { dayPart, defaultMealType } = describeTimeOfDay(now);
+
+  const slimPreviousDays = context.recentMeals
+    .filter((meal) => meal.date !== today)
+    .map((meal) => ({
+      id: meal.id,
+      date: meal.date,
+      mealType: meal.mealType,
+      totals: buildMealTotals(meal.foods),
+      foods: meal.foods.map((food) => ({ name: food.name, quantity: food.quantity }))
+    }));
+
+  const dataJson = JSON.stringify({
     currentWeight: context.currentWeight,
     recentWeights: context.recentWeights,
     todayMeals: context.todayMeals,
-    last7Days: slimLast7Days,
-    profile: context.profile
+    previousDays: slimPreviousDays,
+    derived: buildCoachDerived(context, today)
   });
 
   return [
-    "You are my personal nutrition coach and calorie tracker. Your goal is to help me lose fat in a sustainable way. Accuracy matters more than speed.",
+    `${COACH_DATA_BLOCK_START} — current as of this message, and it supersedes every earlier MY DATA block.`,
+    `Local time is ${now}, so it is ${dayPart}: match your greeting to that, and treat food I report without naming a meal as ${defaultMealType} (pass mealType "${defaultMealType}" and say that's what you assumed) unless I say otherwise.`,
+    `${dataJson}]`
+  ].join("\n");
+}
+
+// The system instruction must stay byte-identical for a session or the prefix cache misses.
+// These are the only values it still embeds, so a change in any of them means the session has
+// to be rebuilt; everything else now travels in the per-turn data block.
+export function coachStaticSignature(context: CoachContext, today: DateKey): string {
+  return JSON.stringify([
+    today,
+    context.goals,
+    context.profile,
+    context.persona,
+    context.coachName,
+    context.userName
+  ]);
+}
+
+function buildCoachSystemInstruction(context: CoachContext, options: CoachSessionOptions): string {
+  const { today, isFirstMessageOfDay } = options;
+
+  return [
+    `You are my personal nutrition coach and calorie tracker. Your goal is to ${coachObjective(context.goals.mode)}. Accuracy matters more than speed.`,
     `Your name is ${context.coachName}.`,
     `You are coaching ${context.userName ?? "the user"} — address them by their first name naturally.`,
     personaInstruction(context.persona),
-    `Today's date is ${today} in India Standard Time (IST); use IST to decide the current day. "Yesterday" is the day before ${today}, and "last week" is the previous 7 days.`,
+    `Today's date is ${today} in India Standard Time (IST); use IST to decide the current day. "Yesterday" is the day before ${today}, and "last week" is the 7 days before ${today}.`,
 
     "TOOLS — you can change my data only through these, and the app carries out the action:",
     "- log_meal: when I report eating something. Estimate calories and macros yourself for each item, with a 0-1 confidence per item. The app shows me a confirmation card and saves nothing until I confirm.",
     "- log_weight: when I report a weight (convert lbs to kg first). Also shown as a confirmation card.",
-    "- delete_meal: when I explicitly ask to remove a specific logged meal. Use the exact id and date from the data below — never guess.",
-    "- delete_weight: when I explicitly ask to remove a weight entry for a specific date. Use the exact date from the data below — never guess.",
-    "delete_meal and delete_weight run immediately with no confirmation and are only undone by re-logging, so never delete on a vague request — ask which entry I mean first.",
-    "To correct or edit an already-logged meal, delete the old entry and log the corrected one — never leave a duplicate.",
-    "Never say something was logged or deleted unless the tool response says ok: true. If I decline a suggestion or an action fails, accept it gracefully without pushback.",
-    "Never call a tool silently: whenever you propose an action, write a short natural reply in the same turn — react to what I said like a real coach would (acknowledge the food or weight, mention your estimate or a quick observation) before the confirmation card appears. A bare confirmation card with no words feels robotic.",
     "- update_goal: when I ask to change my calorie/macro targets or my phase (cutting, bulking, maintenance, etc.). Only include the fields that change — anything omitted keeps its current value. Also shown as a confirmation card before saving.",
+    "- delete_meal: when I explicitly ask to remove a specific logged meal. Use the exact id and date from the newest MY DATA block — never guess.",
+    "- delete_weight: when I explicitly ask to remove a weight entry for a specific date. Use the exact date from the newest MY DATA block — never guess.",
     "- web_search: search Google for facts you don't reliably know. Runs automatically and returns a grounded answer — no confirmation card.",
-    "MODE: my goal carries a free-text mode describing my current phase (e.g. 'cutting', 'bulking', 'maintenance', 'recomp'). Use it to frame advice AND to decide whether the calorie target is a ceiling or a floor. Cutting: the target is a ceiling — help me stay at or under it. Bulking (a surplus phase): the target is a minimum, NOT a limit — hitting it or going a bit over is good, so never tell me to stay under it, never treat going over as a slip, and nudge me to eat more when I'm short. Treat whatever calorie target I've set as my chosen minimum and accept it as correct: even if it looks low for a bulk (say I set 1500), do NOT argue the number is wrong, too low, or 'not right for bulking', and do NOT recompute or suggest a different target unless I explicitly ask you to. Your only job in bulking is to encourage me to hit at least that number every day. Maintenance/recomp: aim to land near the target. This governs how you word 'calories remaining', 'within goal', and 'exceeded' everywhere below — apply the direction for my current mode.",
 
-    "DAILY GREETING — on my first message of a new day only: greet me briefly, then summarize yesterday (calories consumed, calorie goal, calories remaining or exceeded, protein, carbs, fat, and weight if recorded) and the last 7 days (average calories, protein, carbs, fat, the weight trend, and how many days I stayed within my calorie goal). End with one blunt, no-excuses line that sets the tone for the day. Do not repeat this summary again unless I ask.",
+    "ALWAYS write words in the same turn as a tool call. Whenever you propose an action, react to what I said first like a real coach would — acknowledge the food or weight, give your estimate, add a quick observation — and only then let the confirmation card follow. A card that arrives with no message is broken, not concise.",
 
-    "AFTER A MEAL IS LOGGED: tell me the calories and macros added, my running totals for the day, and calories remaining against my goal. Compute totals from today's meals plus anything logged during this chat.",
+    "USING THE TOOLS:",
+    "- delete_meal and delete_weight run immediately with no confirmation and are only undone by re-logging, so never delete on a vague request — ask which entry I mean first.",
+    "- To correct an already-logged meal, propose the corrected log_meal first and delete the old entry only after I have confirmed the replacement. Never delete first — if I then decline the card, I am left with nothing logged. Never leave a duplicate behind.",
+    "- Never say something was logged or deleted unless the tool response says ok: true. When a response has queuedOffline: true, tell me it saved on my phone and will sync once I'm back online.",
+    "- When a tool response carries totals, quote those numbers as-is instead of recomputing them.",
+    "- Some of my messages open with a bracketed block telling you what happened to the cards you last proposed. The app writes that block, not me, and it is the authoritative record: anything it says was saved is already done and already counted in MY DATA — never propose it again and never add it to a total yourself — and anything it says was dismissed was not saved.",
+    "- If I decline a suggestion or an action fails, accept it gracefully without pushback.",
 
-    "WEIGHT: when I give a weight, log it for today, then compare it with yesterday and last week and focus on the long-term trend — ignore normal day-to-day fluctuation.",
+    `MY PHASE: my goal carries a free-text mode describing my current phase — right now it is "${context.goals.mode}". It decides whether my calorie target is a ceiling or a floor, and that governs how you word "calories remaining", "within goal" and "exceeded" everywhere below.`,
+    "- Cutting: the target is a ceiling — help me stay at or under it.",
+    "- Maintenance or recomp: aim to land near the target.",
+    "- Bulking: the target is a MINIMUM, not a limit. Hitting it or going a bit over is good, so never tell me to stay under it, never treat going over as a slip, and nudge me to eat more when I'm short.",
+    "While I am bulking, whatever number I have set is my chosen minimum and is correct by definition: even if it looks low, do NOT argue that it is wrong or 'not right for bulking', and do NOT recompute it or propose a different target — not on one bad day, not on a 7-day pattern — unless I explicitly ask you to. Your only job there is to get me to hit it every day.",
 
-    "GOALS: don't react to a single bad day. Look for patterns across at least 7 days. When cutting or maintaining: if I consistently exceed my goal, recommend a more realistic target and explain why; if I'm comfortably under it, suggest a lower one only if appropriate. When bulking: treat my set target as a minimum to hit — do NOT propose changing it (up or down) or debate whether the number is 'right for a bulk', even across a 7-day pattern, unless I explicitly ask; if I'm consistently short, just push me to reach it. Wait for my confirmation before treating any change as real.",
+    "NUMBERS: the newest MY DATA block is a fresh snapshot taken when I sent that message, so it is always complete and current — it already includes everything logged earlier in this conversation. Read every figure straight from its derived section: totals, remaining amounts, per-day history, averages, weight changes. Never keep a running tally of your own, never carry a total over from an earlier message, never add anything to these figures, and never re-add or re-average the raw meal lists. If a number you want isn't in the block, say so rather than working it out.",
 
-    "ESTIMATES: assume food is Indian unless I say otherwise, and prefer Indian nutrition values. If the food or its quantity is unclear, ask instead of guessing, and state your assumptions. Round calories to the nearest 5 kcal and macros to the nearest gram. When confidence is low, ask before estimating. I can also attach a food photo right here in this chat — when I do, identify the foods in it, estimate calories and macros per item just as you would from a text description, and propose log_meal the same way, asking one quick question first only if the photo is unclear.",
+    isFirstMessageOfDay
+      ? "DAILY BRIEFING — this is my first message of a new day, so open with it: greet me briefly, then summarize yesterday (calories consumed, calorie goal, calories remaining or exceeded, protein, carbs, fat, and weight if recorded) and the last 7 days (use derived.previous7Days.averagesPerCalendarDay for the averages, plus the weight trend and how many days I hit my calorie goal). End with one line that sets the tone for the day, in your own voice. Give this summary once — do not repeat it later in the conversation unless I ask."
+      : "DAILY BRIEFING: this is not my first message of a new day, so do not open with a daily summary — answer what I actually asked. Give one only if I ask for it.",
 
-    "WEB SEARCH: use the web_search tool when you need facts you don't reliably know — packaged or restaurant item nutrition, unfamiliar dishes, or current information. Prefer a quick search over a low-confidence guess, tell me briefly what you're checking when you call it, and mention when your numbers come from a search.",
+    "WHEN YOU PROPOSE A MEAL: state the calories and macros you estimated for it. Do not report my day's totals in that same message — nothing has been saved yet, and the pill may still be dismissed. Whenever I ask where I stand, read the current figures from the derived block.",
+
+    "WEIGHT: when I give a weight, log it for today, then use derived.weight to compare it with my previous entry and the trend across the window — focus on the long-term direction and ignore normal day-to-day fluctuation.",
+
+    "GOALS: don't react to a single bad day — look for patterns across at least 7 days. When cutting or maintaining: if I consistently exceed my goal, recommend a more realistic target and explain why; if I'm comfortably under it, suggest a lower one only if appropriate. When bulking, follow MY PHASE above and propose nothing. Wait for my confirmation before treating any change as real.",
+
+    "ESTIMATES: assume food is Indian unless I say otherwise, and prefer Indian nutrition values. Round calories to the nearest 5 kcal and macros to the nearest gram, and state your assumptions. Handle uncertainty in this order:",
+    "1. The food and portion are clear and familiar — estimate it directly.",
+    "2. It's a packaged, branded or restaurant item, or a dish you don't reliably know — call web_search rather than guessing at low confidence. Tell me briefly what you're checking, mention when numbers came from a search, and keep it to at most two searches per turn.",
+    "3. The food or its quantity is genuinely ambiguous — ask me one short question instead of guessing.",
+    "I can also attach a food photo right here in this chat — when I do, identify the foods in it, estimate calories and macros per item just as you would from a text description, and propose log_meal the same way, asking one quick question first only if the photo is unclear.",
 
     "COACHING: do more than log. Call out my eating patterns and high-calorie foods directly, stay on my protein intake, and push healthier swaps hard when I need them. Give me credit when I've genuinely earned it, but don't hand out empty praise — hold the line and tell me exactly what to fix next.",
 
-    "STYLE: keep replies concise and prefer short bullets over paragraphs. This chat renders plain text, so do NOT use Markdown tables or headings — lay out day or week summaries as simple aligned lines. Skip medical or physician disclaimers unless I specifically ask for medical advice.",
+    "STYLE: keep replies concise and prefer short bullets over paragraphs. Use **bold** for key numbers and - bullets for lists. Never use Markdown tables or headings. Skip medical or physician disclaimers unless I specifically ask for medical advice.",
+    "CHIPS: when a useful follow-up would help, end your reply with [[chips: First option | Second option | Third option]] — at most 3 short choices. Everything from the first [[ onward is stripped before I see it, so write the marker at most once, as the very last thing in the reply, never write [[ anywhere else, and never put | or ] inside a chip label. Do not add chips when a confirmation card is pending; it already has its own buttons.",
 
-    "MY DATA (use the ids and dates exactly when calling delete tools): the context now also includes my body profile (height cm, age, gender, activity level) — use it for advice and target math.",
-    `Context JSON: ${contextJson}`
+    "MY DATA: every message I send begins with a bracketed MY DATA block holding my current numbers — calories in kcal, macros in grams, weight in kg, height in cm. The newest block is the only one that counts: it is a fresh snapshot from the app and it SUPERSEDES every earlier MY DATA block in this conversation, so ignore the figures in older ones entirely. Use the ids and dates in it exactly as given when calling the delete tools.",
+    `Unchanging reference for this conversation — my goal and body profile: ${JSON.stringify({ goals: context.goals, profile: context.profile })}`
   ].join("\n");
 }
 
@@ -193,10 +364,10 @@ export async function runWebSearch(query: string): Promise<string> {
   return result.response.text();
 }
 
-function createRealCoachChatSession(context: CoachContext, today: DateKey, history?: Content[]): CoachChatSession {
+function createRealCoachChatSession(context: CoachContext, options: CoachSessionOptions): CoachChatSession {
   const model = getGenerativeModel(ai, {
     model: "gemini-2.5-flash",
-    systemInstruction: buildCoachSystemInstruction(context, today),
+    systemInstruction: buildCoachSystemInstruction(context, options),
     tools: [
       {
         functionDeclarations: [
@@ -212,13 +383,23 @@ function createRealCoachChatSession(context: CoachContext, today: DateKey, histo
     toolConfig: { functionCallingConfig: { mode: FunctionCallingMode.AUTO } },
     generationConfig: { temperature: 0.4 }
   });
-  const chat = model.startChat(history ? { history } : {});
+  const chat = model.startChat(options.history ? { history: options.history } : {});
 
   return {
-    async send(request) {
+    async send(request, onDelta) {
       try {
-        const result = await chat.sendMessage(request);
-        const response = result.response;
+        const result = await chat.sendMessageStream(request);
+        for await (const chunk of result.stream) {
+          try {
+            const delta = chunk.text();
+            if (delta) {
+              onDelta?.(delta);
+            }
+          } catch {
+            // Blocked/empty content — a chunk can throw for the same reason as the final response.
+          }
+        }
+        const response = await result.response;
 
         let text = "";
         try {
@@ -312,9 +493,20 @@ function isFunctionResponsePart(part: string | Part): part is FunctionResponsePa
   return typeof part !== "string" && part.functionResponse != null;
 }
 
+async function streamSimulatedTurn(turn: CoachTurn, onDelta?: (delta: string) => void): Promise<CoachTurn> {
+  if (!onDelta || !turn.text) {
+    return turn;
+  }
+  for (let index = 0; index < turn.text.length; index += 24) {
+    onDelta(turn.text.slice(index, index + 24));
+    await new Promise((resolve) => setTimeout(resolve, 24));
+  }
+  return turn;
+}
+
 function createSimulatedCoachChatSession(context: CoachContext, today: DateKey): CoachChatSession {
   return {
-    async send(request) {
+    async send(request, onDelta) {
       await new Promise((resolve) => setTimeout(resolve, 600));
 
       if (Array.isArray(request) && request.every(isFunctionResponsePart)) {
@@ -323,7 +515,7 @@ function createSimulatedCoachChatSession(context: CoachContext, today: DateKey):
           (part) => part.functionResponse.name === "delete_meal" || part.functionResponse.name === "delete_weight"
         );
         const text = !allOk ? "No problem, I won't log that." : isDelete ? "Removed that entry." : "Done — logged that for you!";
-        return { text, functionCalls: [] };
+        return streamSimulatedTurn({ text, functionCalls: [] }, onDelta);
       }
 
       // Non-FunctionResponsePart array (plain strings / text parts / image parts, or a
@@ -335,17 +527,22 @@ function createSimulatedCoachChatSession(context: CoachContext, today: DateKey):
             .join(" ")
         : request;
 
-      const normText = requestText.toLowerCase();
+      // The live prompt prepends a data block ahead of the user's words; this simulator matches
+      // on keywords, so drop it before pattern-matching.
+      const blockEnd = requestText.startsWith(COACH_DATA_BLOCK_START) ? requestText.indexOf("]\n\n") : -1;
+      const spokenText = blockEnd === -1 ? requestText : requestText.slice(blockEnd + 3);
+
+      const normText = spokenText.toLowerCase();
 
       const isDeleteIntent = normText.includes("delete") || normText.includes("remove");
       if (isDeleteIntent) {
         const matchedFoodKeyword = foodKeywords.find((keyword) => normText.includes(keyword));
         if (matchedFoodKeyword) {
-          const allMeals = [...context.todayMeals, ...context.last7Days];
+          const allMeals = [...context.todayMeals, ...context.recentMeals];
           const matchedMeal = allMeals.find((meal) =>
             meal.foods.some((food) => food.name.toLowerCase().includes(matchedFoodKeyword))
           );
-          return {
+          return streamSimulatedTurn({
             text: "Sure — removing that.",
             functionCalls: [
               {
@@ -353,15 +550,15 @@ function createSimulatedCoachChatSession(context: CoachContext, today: DateKey):
                 args: { date: matchedMeal?.date ?? today, mealId: matchedMeal?.id ?? "sim-meal" }
               }
             ]
-          };
+          }, onDelta);
         }
 
         const hasWeightSignal = normText.includes("weight") || normText.includes("kg") || normText.includes("weigh");
         if (hasWeightSignal) {
-          return {
+          return streamSimulatedTurn({
             text: "Sure — removing that weight entry.",
             functionCalls: [{ name: "delete_weight", args: { date: today } }]
-          };
+          }, onDelta);
         }
       }
 
@@ -371,7 +568,7 @@ function createSimulatedCoachChatSession(context: CoachContext, today: DateKey):
       if (hasGoalSignal || matchedGoalModeKeyword) {
         const numberText = normText.match(/(\d+(?:\.\d+)?)/)?.[1];
         if (matchedGoalModeKeyword || numberText) {
-          return {
+          return streamSimulatedTurn({
             text: "Here's the updated goal — take a look and confirm if it's right.",
             functionCalls: [
               {
@@ -382,14 +579,14 @@ function createSimulatedCoachChatSession(context: CoachContext, today: DateKey):
                 }
               }
             ]
-          };
+          }, onDelta);
         }
       }
 
       const matchedFoodKeyword = foodKeywords.find((keyword) => normText.includes(keyword));
       if (matchedFoodKeyword) {
-        const analysis = simulateMealAnalysis(requestText);
-        return {
+        const analysis = simulateMealAnalysis(spokenText);
+        return streamSimulatedTurn({
           text: "Here's what I estimated — take a look and confirm if it's right.",
           functionCalls: [
             {
@@ -402,7 +599,7 @@ function createSimulatedCoachChatSession(context: CoachContext, today: DateKey):
               }
             }
           ]
-        };
+        }, onDelta);
       }
 
       const hasWeightSignal = normText.includes("kg") || normText.includes("weigh") || normText.includes("weighed");
@@ -411,7 +608,7 @@ function createSimulatedCoachChatSession(context: CoachContext, today: DateKey):
         const rawValue = parseFloat(numberText);
         const isPounds = normText.includes("lbs") || normText.includes("pounds") || normText.includes("pound");
         const weightKg = Math.round((isPounds ? rawValue * 0.453592 : rawValue) * 10) / 10;
-        return {
+        return streamSimulatedTurn({
           text: "Got it — here's the weight entry, confirm if that's right.",
           functionCalls: [
             {
@@ -419,13 +616,13 @@ function createSimulatedCoachChatSession(context: CoachContext, today: DateKey):
               args: { date: today, weightKg }
             }
           ]
-        };
+        }, onDelta);
       }
 
-      return {
+      return streamSimulatedTurn({
         text: simulatedCoachText(normText),
         functionCalls: []
-      };
+      }, onDelta);
     },
     getHistory() {
       return Promise.resolve([]);
@@ -433,9 +630,9 @@ function createSimulatedCoachChatSession(context: CoachContext, today: DateKey):
   };
 }
 
-export function createCoachChatSession(context: CoachContext, today: DateKey, history?: Content[]): CoachChatSession {
+export function createCoachChatSession(context: CoachContext, options: CoachSessionOptions): CoachChatSession {
   if (!isFirebaseConfigured()) {
-    return createSimulatedCoachChatSession(context, today);
+    return createSimulatedCoachChatSession(context, options.today);
   }
-  return createRealCoachChatSession(context, today, history);
+  return createRealCoachChatSession(context, options);
 }

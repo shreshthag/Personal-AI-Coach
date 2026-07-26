@@ -13,6 +13,20 @@ Expo **dev-client** app, **Android only** (`ios/` is not generated). Verified se
 - **Run:** `npx expo run:android` (debug). **Do NOT pass `--device emulator-5554`** — expo rejects the adb serial with "Could not find device with name"; with a single running emulator, omit the flag. Builds are **arm64-only** (see PLAN.md for the x86 `react-native-worklets` link failure).
 - **Dev launcher:** after install the app opens the Expo **DevLauncher**, not the app. Tap the dev-server row (`http://…:8081`) to load the JS bundle, and wait for `MainActivity` to resume before screenshotting. Metro must stay running on `:8081` for the debug build to load JS (`expo run:android` may exit after launch while leaving the dev server up).
 
+### Stale JS bundle — the dev client silently serves a cache
+
+**The single most misleading failure in this repo.** The installed dev client will happily run an *old* JS bundle with no error, no red screen and no warning, so your edits look like they simply had no effect — or worse, the app appears to work and you "verify" behaviour that isn't the code you just wrote.
+
+It happens whenever the app can't reach Metro, most often because the `adb reverse` tunnel is gone (killing the `expo run:android` process tears it down, and force-stopping/relaunching the app does **not** recreate it).
+
+Before trusting anything you observe on the emulator:
+
+1. `adb reverse --list` must show `tcp:8081 tcp:8081`. If it's empty, `adb reverse tcp:8081 tcp:8081`.
+2. Metro must actually log `Android Bundled <n>ms index.ts (<n> modules)` for the launch you just did. **No bundle line means the app never fetched your code** — reloading, force-stopping and clearing Metro's cache all fail to fix this on their own.
+3. If there's still no bundle line, re-run `npx expo run:android`; that reinstalls and re-establishes the tunnel.
+
+To positively confirm which prompt is live (JS `console.log` does **not** reach `adb logcat` — Metro owns stdout), ask the coach in-app to quote a sentence from its own system instruction back to you and compare it against the source.
+
 ### Icon / `app.config.ts` native changes — prebuild gotcha
 
 - Changing `app.config.ts` (icon, adaptive icon, etc.) requires the `android/` native resources to be regenerated. **`expo run:android` does a non-destructive sync that does NOT regenerate the launcher icon** — the old icon persists no matter how many times you rebuild.

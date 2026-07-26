@@ -2,8 +2,15 @@ import { useEffect, useRef, useState } from "react";
 import type { Content, FunctionResponsePart, Part } from "firebase/ai";
 
 import type { CoachChatMessage, CoachContext, CoachGoalProposalData, CoachProposal, CoachTurn } from "../models/gemini";
+import type { DateKey } from "../models/nutrition";
 import { clearCoachChat, readCoachChat, saveCoachChat } from "../services/cache/coachChatCache";
-import { createCoachChatSession, runWebSearch, type CoachChatSession } from "../services/gemini/coachChat";
+import {
+  buildCoachDataBlock,
+  coachStaticSignature,
+  createCoachChatSession,
+  runWebSearch,
+  type CoachChatSession
+} from "../services/gemini/coachChat";
 import {
   deleteMealArgsSchema,
   deleteWeightArgsSchema,
@@ -12,7 +19,7 @@ import {
   updateGoalArgsSchema,
   webSearchArgsSchema
 } from "../services/gemini/schemas";
-import { toDateKey } from "../utils/date";
+import { toClockTime, toDateKey } from "../utils/date";
 import { toFriendlyError } from "../utils/errors";
 import { createId } from "../utils/id";
 import { buildMealTotals, computeTargets } from "../utils/nutrition";
@@ -32,6 +39,10 @@ type PendingBatch = {
   // rebuild the parts in the original call order regardless of resolution order.
   responses: Map<number, FunctionResponsePart>;
   slotByProposalId: Map<string, number>;
+  // True when the batch contains an auto-executing call (web_search / delete_*): the model
+  // needs those results to continue, so such a batch keeps the old blocking flush. A batch of
+  // only user-confirmable proposals resolves lazily and never triggers a model turn on its own.
+  autoFlush: boolean;
 };
 
 function buildResponsePart(call: { id?: string; name: string }, response: object): FunctionResponsePart {
@@ -56,6 +67,44 @@ function sanitizeHistoryForPersistence(history: Content[]): Content[] {
   }));
 }
 
+function describeProposalOutcome(proposal: CoachProposal): string {
+  if (proposal.status === "confirmed") {
+    if (proposal.tool === "log_meal") {
+      const items = proposal.meal.foods.map((food) => food.name).join(", ");
+      return `Your ${proposal.meal.mealType} suggestion (${items}) was accepted and saved.`;
+    }
+    if (proposal.tool === "log_weight") {
+      return `Your weight suggestion was accepted and saved.`;
+    }
+    if (proposal.tool === "update_goal") {
+      return `Your goal-change suggestion was accepted and saved.`;
+    }
+  }
+  if (proposal.status === "failed") {
+    return `Saving your ${proposal.tool} suggestion failed — nothing was saved.`;
+  }
+  return `The user dismissed your ${proposal.tool} suggestion — nothing was saved.`;
+}
+
+export function parseCoachText(raw: string): { text: string; chips: string[] } {
+  const markerIndex = raw.indexOf("[[");
+  if (markerIndex === -1) {
+    return { text: raw, chips: [] };
+  }
+  const marker = raw.slice(markerIndex);
+  const chipsValue = marker.match(/^\[\[chips:\s*([^\]]+)\]\]/i)?.[1];
+  return {
+    text: raw.slice(0, markerIndex).trimEnd(),
+    chips: chipsValue
+      ? chipsValue
+          .split("|")
+          .map((chip) => chip.trim())
+          .filter(Boolean)
+          .slice(0, 3)
+      : []
+  };
+}
+
 export function useCoachChat(getContext: () => CoachContext) {
   const { user } = useAuth();
   const uid = user?.uid;
@@ -72,11 +121,23 @@ export function useCoachChat(getContext: () => CoachContext) {
 
   const sessionRef = useRef<CoachChatSession | null>(null);
   const historyRef = useRef<Content[]>([]);
+  const lastActiveDateRef = useRef<DateKey | null>(null);
+  // Rebuilding the session replaces the system instruction, which breaks Gemini's prefix cache.
+  // So it is rebuilt only when a value the static instruction embeds actually changes — the date,
+  // goals, profile, persona or names. Fresh numbers ride in the per-turn data block instead.
+  const sessionSignatureRef = useRef<string | null>(null);
   // Bumped by resetChat; async continuations capture the epoch at start and
   // bail if it changed, so a mid-flight reset can never resurrect stale state.
   const epochRef = useRef(0);
   const roundRef = useRef(0);
   const batchRef = useRef<PendingBatch | null>(null);
+  // Outcomes of pills the user resolved (or walked away from) since the last message.
+  // These ride along as text, not as functionResponse parts: the SDK rejects a message that
+  // mixes a FunctionResponse with any other part, and Gemini is happy to accept a plain user
+  // turn while an earlier functionCall sits unanswered.
+  const pendingOutcomesRef = useRef<string[]>([]);
+  const streamMsgIdRef = useRef<string | null>(null);
+  const streamRawTextRef = useRef("");
 
   // Ref mirrors so async continuations always read/write the latest state
   // instead of a stale render closure.
@@ -118,7 +179,16 @@ export function useCoachChat(getContext: () => CoachContext) {
             ? { ...proposal, status: "declined" }
             : proposal;
       }
-      historyRef.current = snapshot.history;
+      // A trailing model turn with an unanswered function call can't be resumed — the
+      // responses lived in memory and died with the process. Drop it so the restored
+      // session starts from a clean turn boundary.
+      const restoredHistory = snapshot.history.filter((content, index) => {
+        const isLast = index === snapshot.history.length - 1;
+        return !(isLast && content.parts.some((part) => part.functionCall != null));
+      });
+      historyRef.current = restoredHistory;
+      lastActiveDateRef.current = snapshot.lastActiveDate ?? null;
+      pendingOutcomesRef.current = snapshot.pendingOutcomes ?? [];
       applyMessages(() => snapshot.messages);
       applyProposals(() => restoredProposals);
     });
@@ -131,18 +201,87 @@ export function useCoachChat(getContext: () => CoachContext) {
     void saveCoachChat(uid, {
       messages: messagesRef.current,
       proposals: proposalsRef.current,
-      history: sanitizeHistoryForPersistence(historyRef.current)
+      history: sanitizeHistoryForPersistence(historyRef.current),
+      ...(lastActiveDateRef.current ? { lastActiveDate: lastActiveDateRef.current } : {}),
+      ...(pendingOutcomesRef.current.length > 0 ? { pendingOutcomes: pendingOutcomesRef.current } : {})
     });
   }
 
-  function appendCoachText(text: string): void {
-    if (text) {
-      applyMessages((prev) => [...prev, { id: createId("msg"), kind: "coach", text }]);
+  function beginStreamingTurn(): void {
+    streamMsgIdRef.current = null;
+    streamRawTextRef.current = "";
+  }
+
+  function handleStreamDelta(delta: string, epoch: number): void {
+    if (epoch !== epochRef.current) {
+      return;
     }
+    streamRawTextRef.current += delta;
+    const { text } = parseCoachText(streamRawTextRef.current);
+    if (!text) {
+      return;
+    }
+    if (!streamMsgIdRef.current) {
+      const id = createId("msg");
+      streamMsgIdRef.current = id;
+      applyMessages((prev) => [...prev, { id, kind: "coach", text, streaming: true }]);
+      return;
+    }
+    const id = streamMsgIdRef.current;
+    applyMessages((prev) =>
+      prev.map((message) => (message.id === id && message.kind === "coach" ? { ...message, text } : message))
+    );
+  }
+
+  function finalizeCoachText(raw: string): void {
+    const { text, chips } = parseCoachText(raw);
+    const streamMsgId = streamMsgIdRef.current;
+    streamMsgIdRef.current = null;
+    streamRawTextRef.current = "";
+
+    if (streamMsgId) {
+      if (!text) {
+        applyMessages((prev) => prev.filter((message) => message.id !== streamMsgId));
+        return;
+      }
+      applyMessages((prev) =>
+        prev.map((message) => {
+          if (message.id !== streamMsgId || message.kind !== "coach") {
+            return message;
+          }
+          const { streaming: _streaming, quickReplies: _quickReplies, ...settled } = message;
+          return { ...settled, text, ...(chips.length > 0 ? { quickReplies: chips } : {}) };
+        })
+      );
+      return;
+    }
+
+    if (text) {
+      applyMessages((prev) => [...prev, { id: createId("msg"), kind: "coach", text, ...(chips.length > 0 ? { quickReplies: chips } : {}) }]);
+    }
+  }
+
+  function clearStreamingMessage(): void {
+    const streamMsgId = streamMsgIdRef.current;
+    streamMsgIdRef.current = null;
+    streamRawTextRef.current = "";
+    if (!streamMsgId) {
+      return;
+    }
+    applyMessages((prev) =>
+      prev.map((message) => {
+        if (message.id !== streamMsgId || message.kind !== "coach") {
+          return message;
+        }
+        const { streaming: _streaming, ...settled } = message;
+        return settled;
+      })
+    );
   }
 
   function handleSendError(sendError: unknown, wasFlush: boolean): void {
     const friendly = toFriendlyError(sendError, "The coach could not respond. Please retry.");
+    clearStreamingMessage();
     applyMessages((prev) => [...prev, { id: createId("msg"), kind: "error", text: friendly }]);
     setError(friendly);
     if (wasFlush) {
@@ -173,7 +312,7 @@ export function useCoachChat(getContext: () => CoachContext) {
   }
 
   async function handleTurn(turn: CoachTurn, epoch: number, session: CoachChatSession): Promise<void> {
-    appendCoachText(turn.text);
+    finalizeCoachText(turn.text);
 
     if (turn.functionCalls.length === 0) {
       await finishTurn(epoch, session);
@@ -188,11 +327,12 @@ export function useCoachChat(getContext: () => CoachContext) {
         buildResponsePart(call, { ok: false, error: "Action limit reached, please try a simpler request." })
       );
       try {
-        const closing = await session.send(parts);
+        beginStreamingTurn();
+        const closing = await session.send(parts, (delta) => handleStreamDelta(delta, epoch));
         if (epoch !== epochRef.current) {
           return;
         }
-        appendCoachText(closing.text);
+        finalizeCoachText(closing.text);
       } catch (sendError) {
         if (epoch !== epochRef.current) {
           return;
@@ -208,7 +348,8 @@ export function useCoachChat(getContext: () => CoachContext) {
     const batch: PendingBatch = {
       calls: turn.functionCalls,
       responses: new Map(),
-      slotByProposalId: new Map()
+      slotByProposalId: new Map(),
+      autoFlush: false
     };
     const context = getContext();
     const autoExecuteIds: string[] = [];
@@ -256,10 +397,11 @@ export function useCoachChat(getContext: () => CoachContext) {
           );
         }
       } else if (call.name === "delete_meal") {
+        batch.autoFlush = true;
         const parsed = deleteMealArgsSchema.safeParse(call.args);
         const meal = parsed.success
           ? (context.todayMeals.find((item) => item.id === parsed.data.mealId && item.date === parsed.data.date) ??
-              context.last7Days.find((item) => item.id === parsed.data.mealId && item.date === parsed.data.date))
+              context.recentMeals.find((item) => item.id === parsed.data.mealId && item.date === parsed.data.date))
           : undefined;
         if (parsed.success && meal) {
           const proposalId = createId("proposal");
@@ -288,6 +430,7 @@ export function useCoachChat(getContext: () => CoachContext) {
           batch.responses.set(index, buildResponsePart(call, { ok: false, error: "That meal isn't in your recent data." }));
         }
       } else if (call.name === "delete_weight") {
+        batch.autoFlush = true;
         const parsed = deleteWeightArgsSchema.safeParse(call.args);
         const weight = parsed.success
           ? (context.recentWeights.find((entry) => entry.date === parsed.data.date) ??
@@ -357,6 +500,7 @@ export function useCoachChat(getContext: () => CoachContext) {
           );
         }
       } else if (call.name === "web_search") {
+        batch.autoFlush = true;
         const parsed = webSearchArgsSchema.safeParse(call.args);
         if (parsed.success) {
           // Auto-executes with no proposal card; the flush waits until the
@@ -394,7 +538,7 @@ export function useCoachChat(getContext: () => CoachContext) {
 
     batchRef.current = batch;
 
-    if (pendingCount > 0) {
+    if (pendingCount > 0 && batch.autoFlush) {
       applyStatus("awaitingConfirmation");
     }
 
@@ -406,6 +550,12 @@ export function useCoachChat(getContext: () => CoachContext) {
       // Every call resolved immediately (validation/unknown-tool failures) — no
       // user action to wait for, flush right away.
       await maybeFlushBatch(epoch, session);
+    }
+
+    if (pendingCount > 0 && !batch.autoFlush) {
+      // Pure-proposal batch: the pill is on screen and the user can keep chatting. The
+      // function responses stay in batchRef and ride along with their next message.
+      await finishTurn(epoch, session);
     }
   }
 
@@ -419,7 +569,8 @@ export function useCoachChat(getContext: () => CoachContext) {
     roundRef.current += 1;
     applyStatus("waitingForModel");
     try {
-      const turn = await session.send(parts);
+      beginStreamingTurn();
+      const turn = await session.send(parts, (delta) => handleStreamDelta(delta, epoch));
       if (epoch !== epochRef.current) {
         return;
       }
@@ -432,23 +583,65 @@ export function useCoachChat(getContext: () => CoachContext) {
     }
   }
 
+  // Marks anything the user never answered as dismissed and drains the notes for sending.
+  function harvestPendingOutcomes(): string[] {
+    const batch = batchRef.current;
+    if (batch && !batch.autoFlush) {
+      batch.slotByProposalId.forEach((_slot, proposalId) => {
+        const proposal = proposalsRef.current[proposalId];
+        if (proposal && proposal.status === "pending") {
+          applyProposals((prev) => ({ ...prev, [proposalId]: { ...prev[proposalId], status: "declined" } as CoachProposal }));
+          pendingOutcomesRef.current = [
+            ...pendingOutcomesRef.current,
+            describeProposalOutcome({ ...proposal, status: "declined" } as CoachProposal)
+          ];
+        }
+      });
+      batchRef.current = null;
+    }
+    const outcomes = pendingOutcomesRef.current;
+    pendingOutcomesRef.current = [];
+    return outcomes;
+  }
+
   async function sendMessage(text: string, image?: { uri: string; base64: string; mimeType: string }): Promise<void> {
     if (statusRef.current !== "idle") {
       return;
     }
     const epoch = epochRef.current;
-    sessionRef.current ??= createCoachChatSession(getContext(), toDateKey(), historyRef.current);
+    const today = toDateKey();
+    const now = toClockTime();
+    const context = getContext();
+    const signature = coachStaticSignature(context, today);
+    if (sessionSignatureRef.current !== null && sessionSignatureRef.current !== signature) {
+      sessionRef.current = null;
+    }
+    sessionRef.current ??= createCoachChatSession(context, {
+      today,
+      now,
+      isFirstMessageOfDay: lastActiveDateRef.current !== today,
+      history: historyRef.current
+    });
+    sessionSignatureRef.current = signature;
+    lastActiveDateRef.current = today;
     const session = sessionRef.current;
     const trimmed = text.trim();
+    const outcomes = harvestPendingOutcomes();
+    const prefix =
+      outcomes.length > 0
+        ? `[What happened to the cards you last proposed — the resulting numbers are already in MY DATA below: ${outcomes.join(" ")}]\n\n`
+        : "";
+    const dataBlock = buildCoachDataBlock(context, today, now);
     const request: string | (string | Part)[] = image
-      ? [trimmed || "Here's a photo of what I ate.", { inlineData: { mimeType: image.mimeType, data: image.base64 } }]
-      : trimmed;
+      ? [`${dataBlock}\n\n${prefix}${trimmed || "Here's a photo of what I ate."}`, { inlineData: { mimeType: image.mimeType, data: image.base64 } }]
+      : `${dataBlock}\n\n${prefix}${trimmed}`;
     applyMessages((prev) => [...prev, { id: createId("msg"), kind: "user", text: trimmed, ...(image ? { imageUri: image.uri } : {}) }]);
     roundRef.current = 0;
     setError(null);
     applyStatus("waitingForModel");
     try {
-      const turn = await session.send(request);
+      beginStreamingTurn();
+      const turn = await session.send(request, (delta) => handleStreamDelta(delta, epoch));
       if (epoch !== epochRef.current) {
         return;
       }
@@ -554,7 +747,18 @@ export function useCoachChat(getContext: () => CoachContext) {
       applyMessages((prev) => [...prev, { id: createId("msg"), kind: "error", text: friendly }]);
       batch.responses.set(slot, buildResponsePart(call, { ok: false, error: friendly }));
     }
-    await maybeFlushBatch(epoch, session);
+    if (batch.autoFlush) {
+      await maybeFlushBatch(epoch, session);
+      return;
+    }
+    const resolved = proposalsRef.current[proposalId];
+    if (resolved) {
+      pendingOutcomesRef.current = [...pendingOutcomesRef.current, describeProposalOutcome(resolved)];
+    }
+    // A pure-proposal batch triggers no model turn, so nothing else will persist the
+    // resolved pill — without this, a kill before the next message would restore a
+    // meal that really was logged as a dismissed suggestion.
+    persistSnapshot();
   }
 
   async function confirmProposal(proposalId: string): Promise<void> {
@@ -581,15 +785,25 @@ export function useCoachChat(getContext: () => CoachContext) {
       slot,
       buildResponsePart(call, { ok: false, declined: true, reason: "The user declined this action." })
     );
-    await maybeFlushBatch(epoch, session);
+    if (batch.autoFlush) {
+      await maybeFlushBatch(epoch, session);
+      return;
+    }
+    pendingOutcomesRef.current = [...pendingOutcomesRef.current, describeProposalOutcome(proposalsRef.current[proposalId] as CoachProposal)];
+    persistSnapshot();
   }
 
   function resetChat(): void {
     epochRef.current += 1;
     sessionRef.current = null;
+    sessionSignatureRef.current = null;
+    // lastActiveDateRef intentionally survives a reset: the daily briefing is once per day, not once per chat.
     historyRef.current = [];
     batchRef.current = null;
     roundRef.current = 0;
+    pendingOutcomesRef.current = [];
+    streamMsgIdRef.current = null;
+    streamRawTextRef.current = "";
     applyMessages(() => []);
     applyProposals(() => ({}));
     setError(null);
