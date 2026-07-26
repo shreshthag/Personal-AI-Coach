@@ -244,8 +244,12 @@ function coachObjective(mode: string): string {
   return "help me hold my weight steady and keep improving my body composition";
 }
 
-function buildCoachSystemInstruction(context: CoachContext, options: CoachSessionOptions): string {
-  const { today, now, isFirstMessageOfDay } = options;
+// Marks the start of the per-turn data block. Exported so the simulated session can strip it
+// before keyword-matching, and so the block's end can be located unambiguously ("]\n\n" cannot
+// occur inside it because JSON.stringify emits no newlines).
+export const COACH_DATA_BLOCK_START = "[MY DATA";
+
+export function buildCoachDataBlock(context: CoachContext, today: DateKey, now: string): string {
   const { dayPart, defaultMealType } = describeTimeOfDay(now);
 
   const slimPreviousDays = context.recentMeals
@@ -258,9 +262,7 @@ function buildCoachSystemInstruction(context: CoachContext, options: CoachSessio
       foods: meal.foods.map((food) => ({ name: food.name, quantity: food.quantity }))
     }));
 
-  const contextJson = JSON.stringify({
-    goals: context.goals,
-    profile: context.profile,
+  const dataJson = JSON.stringify({
     currentWeight: context.currentWeight,
     recentWeights: context.recentWeights,
     todayMeals: context.todayMeals,
@@ -269,19 +271,42 @@ function buildCoachSystemInstruction(context: CoachContext, options: CoachSessio
   });
 
   return [
+    `${COACH_DATA_BLOCK_START} — current as of this message, and it supersedes every earlier MY DATA block.`,
+    `Local time is ${now}, so it is ${dayPart}: match your greeting to that, and treat food I report without naming a meal as ${defaultMealType} (pass mealType "${defaultMealType}" and say that's what you assumed) unless I say otherwise.`,
+    `${dataJson}]`
+  ].join("\n");
+}
+
+// The system instruction must stay byte-identical for a session or the prefix cache misses.
+// These are the only values it still embeds, so a change in any of them means the session has
+// to be rebuilt; everything else now travels in the per-turn data block.
+export function coachStaticSignature(context: CoachContext, today: DateKey): string {
+  return JSON.stringify([
+    today,
+    context.goals,
+    context.profile,
+    context.persona,
+    context.coachName,
+    context.userName
+  ]);
+}
+
+function buildCoachSystemInstruction(context: CoachContext, options: CoachSessionOptions): string {
+  const { today, isFirstMessageOfDay } = options;
+
+  return [
     `You are my personal nutrition coach and calorie tracker. Your goal is to ${coachObjective(context.goals.mode)}. Accuracy matters more than speed.`,
     `Your name is ${context.coachName}.`,
     `You are coaching ${context.userName ?? "the user"} — address them by their first name naturally.`,
     personaInstruction(context.persona),
-    `Today's date is ${today} and the local time is ${now} — it is currently ${dayPart} in India Standard Time (IST); use IST to decide the current day. "Yesterday" is the day before ${today}, and "last week" is the 7 days before ${today}.`,
-    `It is ${dayPart}, so match your greeting to that — never greet me with the wrong part of the day. When I report food without saying which meal it was, it is ${defaultMealType}: pass mealType "${defaultMealType}" and tell me that's what you assumed, unless I say otherwise.`,
+    `Today's date is ${today} in India Standard Time (IST); use IST to decide the current day. "Yesterday" is the day before ${today}, and "last week" is the 7 days before ${today}.`,
 
     "TOOLS — you can change my data only through these, and the app carries out the action:",
     "- log_meal: when I report eating something. Estimate calories and macros yourself for each item, with a 0-1 confidence per item. The app shows me a confirmation card and saves nothing until I confirm.",
     "- log_weight: when I report a weight (convert lbs to kg first). Also shown as a confirmation card.",
     "- update_goal: when I ask to change my calorie/macro targets or my phase (cutting, bulking, maintenance, etc.). Only include the fields that change — anything omitted keeps its current value. Also shown as a confirmation card before saving.",
-    "- delete_meal: when I explicitly ask to remove a specific logged meal. Use the exact id and date from MY DATA below — never guess.",
-    "- delete_weight: when I explicitly ask to remove a weight entry for a specific date. Use the exact date from MY DATA below — never guess.",
+    "- delete_meal: when I explicitly ask to remove a specific logged meal. Use the exact id and date from the newest MY DATA block — never guess.",
+    "- delete_weight: when I explicitly ask to remove a weight entry for a specific date. Use the exact date from the newest MY DATA block — never guess.",
     "- web_search: search Google for facts you don't reliably know. Runs automatically and returns a grounded answer — no confirmation card.",
 
     "ALWAYS write words in the same turn as a tool call. Whenever you propose an action, react to what I said first like a real coach would — acknowledge the food or weight, give your estimate, add a quick observation — and only then let the confirmation card follow. A card that arrives with no message is broken, not concise.",
@@ -291,7 +316,7 @@ function buildCoachSystemInstruction(context: CoachContext, options: CoachSessio
     "- To correct an already-logged meal, propose the corrected log_meal first and delete the old entry only after I have confirmed the replacement. Never delete first — if I then decline the card, I am left with nothing logged. Never leave a duplicate behind.",
     "- Never say something was logged or deleted unless the tool response says ok: true. When a response has queuedOffline: true, tell me it saved on my phone and will sync once I'm back online.",
     "- When a tool response carries totals, quote those numbers as-is instead of recomputing them.",
-    "- Some of my messages open with a bracketed block labelled \"App events since your last message\". The app writes that block, not me, and it is the authoritative record of what happened to the cards you proposed. Trust it: anything it says was logged is already saved — never propose it again — and anything it says was dismissed was not saved. Add logged items to my running totals on top of derived.today.",
+    "- Some of my messages open with a bracketed block telling you what happened to the cards you last proposed. The app writes that block, not me, and it is the authoritative record: anything it says was saved is already done and already counted in MY DATA — never propose it again and never add it to a total yourself — and anything it says was dismissed was not saved.",
     "- If I decline a suggestion or an action fails, accept it gracefully without pushback.",
 
     `MY PHASE: my goal carries a free-text mode describing my current phase — right now it is "${context.goals.mode}". It decides whether my calorie target is a ceiling or a floor, and that governs how you word "calories remaining", "within goal" and "exceeded" everywhere below.`,
@@ -300,13 +325,13 @@ function buildCoachSystemInstruction(context: CoachContext, options: CoachSessio
     "- Bulking: the target is a MINIMUM, not a limit. Hitting it or going a bit over is good, so never tell me to stay under it, never treat going over as a slip, and nudge me to eat more when I'm short.",
     "While I am bulking, whatever number I have set is my chosen minimum and is correct by definition: even if it looks low, do NOT argue that it is wrong or 'not right for bulking', and do NOT recompute it or propose a different target — not on one bad day, not on a 7-day pattern — unless I explicitly ask you to. Your only job there is to get me to hit it every day.",
 
-    "NUMBERS: the derived block in MY DATA already has my totals, remaining amounts, per-day history, 7-day averages and weight changes computed for me. Always use those figures verbatim — never re-add the raw meal lists yourself, never restate a total you were handed, and never divide or re-average anything — if you want an average, it is already in the derived block. The only arithmetic you do is adding food logged during this chat on top of derived.today.",
+    "NUMBERS: the newest MY DATA block is a fresh snapshot taken when I sent that message, so it is always complete and current — it already includes everything logged earlier in this conversation. Read every figure straight from its derived section: totals, remaining amounts, per-day history, averages, weight changes. Never keep a running tally of your own, never carry a total over from an earlier message, never add anything to these figures, and never re-add or re-average the raw meal lists. If a number you want isn't in the block, say so rather than working it out.",
 
     isFirstMessageOfDay
       ? "DAILY BRIEFING — this is my first message of a new day, so open with it: greet me briefly, then summarize yesterday (calories consumed, calorie goal, calories remaining or exceeded, protein, carbs, fat, and weight if recorded) and the last 7 days (use derived.previous7Days.averagesPerCalendarDay for the averages, plus the weight trend and how many days I hit my calorie goal). End with one line that sets the tone for the day, in your own voice. Give this summary once — do not repeat it later in the conversation unless I ask."
       : "DAILY BRIEFING: this is not my first message of a new day, so do not open with a daily summary — answer what I actually asked. Give one only if I ask for it.",
 
-    "AFTER A MEAL IS LOGGED: tell me the calories and macros added, my running totals for the day, and calories remaining against my goal.",
+    "WHEN YOU PROPOSE A MEAL: state the calories and macros you estimated for it. Do not report my day's totals in that same message — nothing has been saved yet, and the pill may still be dismissed. Whenever I ask where I stand, read the current figures from the derived block.",
 
     "WEIGHT: when I give a weight, log it for today, then use derived.weight to compare it with my previous entry and the trend across the window — focus on the long-term direction and ignore normal day-to-day fluctuation.",
 
@@ -323,8 +348,8 @@ function buildCoachSystemInstruction(context: CoachContext, options: CoachSessio
     "STYLE: keep replies concise and prefer short bullets over paragraphs. Use **bold** for key numbers and - bullets for lists. Never use Markdown tables or headings. Skip medical or physician disclaimers unless I specifically ask for medical advice.",
     "CHIPS: when a useful follow-up would help, end your reply with [[chips: First option | Second option | Third option]] — at most 3 short choices. Everything from the first [[ onward is stripped before I see it, so write the marker at most once, as the very last thing in the reply, never write [[ anywhere else, and never put | or ] inside a chip label. Do not add chips when a confirmation card is pending; it already has its own buttons.",
 
-    "MY DATA — calories in kcal, macros in grams, weight in kg, height in cm. Use ids and dates exactly as given when calling the delete tools.",
-    `Context JSON: ${contextJson}`
+    "MY DATA: every message I send begins with a bracketed MY DATA block holding my current numbers — calories in kcal, macros in grams, weight in kg, height in cm. The newest block is the only one that counts: it is a fresh snapshot from the app and it SUPERSEDES every earlier MY DATA block in this conversation, so ignore the figures in older ones entirely. Use the ids and dates in it exactly as given when calling the delete tools.",
+    `Unchanging reference for this conversation — my goal and body profile: ${JSON.stringify({ goals: context.goals, profile: context.profile })}`
   ].join("\n");
 }
 
@@ -502,7 +527,12 @@ function createSimulatedCoachChatSession(context: CoachContext, today: DateKey):
             .join(" ")
         : request;
 
-      const normText = requestText.toLowerCase();
+      // The live prompt prepends a data block ahead of the user's words; this simulator matches
+      // on keywords, so drop it before pattern-matching.
+      const blockEnd = requestText.startsWith(COACH_DATA_BLOCK_START) ? requestText.indexOf("]\n\n") : -1;
+      const spokenText = blockEnd === -1 ? requestText : requestText.slice(blockEnd + 3);
+
+      const normText = spokenText.toLowerCase();
 
       const isDeleteIntent = normText.includes("delete") || normText.includes("remove");
       if (isDeleteIntent) {
@@ -555,7 +585,7 @@ function createSimulatedCoachChatSession(context: CoachContext, today: DateKey):
 
       const matchedFoodKeyword = foodKeywords.find((keyword) => normText.includes(keyword));
       if (matchedFoodKeyword) {
-        const analysis = simulateMealAnalysis(requestText);
+        const analysis = simulateMealAnalysis(spokenText);
         return streamSimulatedTurn({
           text: "Here's what I estimated — take a look and confirm if it's right.",
           functionCalls: [

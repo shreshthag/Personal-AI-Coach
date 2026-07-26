@@ -4,7 +4,13 @@ import type { Content, FunctionResponsePart, Part } from "firebase/ai";
 import type { CoachChatMessage, CoachContext, CoachGoalProposalData, CoachProposal, CoachTurn } from "../models/gemini";
 import type { DateKey } from "../models/nutrition";
 import { clearCoachChat, readCoachChat, saveCoachChat } from "../services/cache/coachChatCache";
-import { createCoachChatSession, runWebSearch, type CoachChatSession } from "../services/gemini/coachChat";
+import {
+  buildCoachDataBlock,
+  coachStaticSignature,
+  createCoachChatSession,
+  runWebSearch,
+  type CoachChatSession
+} from "../services/gemini/coachChat";
 import {
   deleteMealArgsSchema,
   deleteWeightArgsSchema,
@@ -64,15 +70,14 @@ function sanitizeHistoryForPersistence(history: Content[]): Content[] {
 function describeProposalOutcome(proposal: CoachProposal): string {
   if (proposal.status === "confirmed") {
     if (proposal.tool === "log_meal") {
-      const totals = buildMealTotals(proposal.meal.foods);
-      const items = proposal.meal.foods.map((food) => `${food.name} (${food.quantity})`).join(", ");
-      return `Logged ${proposal.meal.mealType} on ${proposal.meal.date}: ${items} — ${totals.totalCalories} kcal, ${totals.totalProtein} g protein, ${totals.totalCarbs} g carbs, ${totals.totalFat} g fat.`;
+      const items = proposal.meal.foods.map((food) => food.name).join(", ");
+      return `Your ${proposal.meal.mealType} suggestion (${items}) was accepted and saved.`;
     }
     if (proposal.tool === "log_weight") {
-      return `Logged weight ${proposal.weight.weightKg} kg on ${proposal.weight.date}.`;
+      return `Your weight suggestion was accepted and saved.`;
     }
     if (proposal.tool === "update_goal") {
-      return `Goal updated to ${proposal.goal.calories} kcal, ${proposal.goal.protein} g protein, ${proposal.goal.carbs} g carbs, ${proposal.goal.fat} g fat, mode ${proposal.goal.mode}.`;
+      return `Your goal-change suggestion was accepted and saved.`;
     }
   }
   if (proposal.status === "failed") {
@@ -116,10 +121,11 @@ export function useCoachChat(getContext: () => CoachContext) {
 
   const sessionRef = useRef<CoachChatSession | null>(null);
   const historyRef = useRef<Content[]>([]);
-  // The system instruction bakes in the date, so a session built yesterday would log
-  // today's meals against the wrong day — rebuild it when the day rolls over.
-  const sessionDateRef = useRef<DateKey | null>(null);
   const lastActiveDateRef = useRef<DateKey | null>(null);
+  // Rebuilding the session replaces the system instruction, which breaks Gemini's prefix cache.
+  // So it is rebuilt only when a value the static instruction embeds actually changes — the date,
+  // goals, profile, persona or names. Fresh numbers ride in the per-turn data block instead.
+  const sessionSignatureRef = useRef<string | null>(null);
   // Bumped by resetChat; async continuations capture the epoch at start and
   // bail if it changed, so a mid-flight reset can never resurrect stale state.
   const epochRef = useRef(0);
@@ -604,28 +610,31 @@ export function useCoachChat(getContext: () => CoachContext) {
     }
     const epoch = epochRef.current;
     const today = toDateKey();
-    if (sessionDateRef.current !== null && sessionDateRef.current !== today) {
-      // Day rolled over mid-conversation — drop the session so the next one carries today's date.
+    const now = toClockTime();
+    const context = getContext();
+    const signature = coachStaticSignature(context, today);
+    if (sessionSignatureRef.current !== null && sessionSignatureRef.current !== signature) {
       sessionRef.current = null;
     }
-    sessionRef.current ??= createCoachChatSession(getContext(), {
+    sessionRef.current ??= createCoachChatSession(context, {
       today,
-      now: toClockTime(),
+      now,
       isFirstMessageOfDay: lastActiveDateRef.current !== today,
       history: historyRef.current
     });
-    sessionDateRef.current = today;
+    sessionSignatureRef.current = signature;
     lastActiveDateRef.current = today;
     const session = sessionRef.current;
     const trimmed = text.trim();
     const outcomes = harvestPendingOutcomes();
     const prefix =
       outcomes.length > 0
-        ? `[App events since your last message — these already happened, do not repeat them: ${outcomes.join(" ")}]\n\n`
+        ? `[What happened to the cards you last proposed — the resulting numbers are already in MY DATA below: ${outcomes.join(" ")}]\n\n`
         : "";
+    const dataBlock = buildCoachDataBlock(context, today, now);
     const request: string | (string | Part)[] = image
-      ? [`${prefix}${trimmed || "Here's a photo of what I ate."}`, { inlineData: { mimeType: image.mimeType, data: image.base64 } }]
-      : `${prefix}${trimmed}`;
+      ? [`${dataBlock}\n\n${prefix}${trimmed || "Here's a photo of what I ate."}`, { inlineData: { mimeType: image.mimeType, data: image.base64 } }]
+      : `${dataBlock}\n\n${prefix}${trimmed}`;
     applyMessages((prev) => [...prev, { id: createId("msg"), kind: "user", text: trimmed, ...(image ? { imageUri: image.uri } : {}) }]);
     roundRef.current = 0;
     setError(null);
@@ -787,7 +796,7 @@ export function useCoachChat(getContext: () => CoachContext) {
   function resetChat(): void {
     epochRef.current += 1;
     sessionRef.current = null;
-    sessionDateRef.current = null;
+    sessionSignatureRef.current = null;
     // lastActiveDateRef intentionally survives a reset: the daily briefing is once per day, not once per chat.
     historyRef.current = [];
     batchRef.current = null;
