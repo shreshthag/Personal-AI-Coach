@@ -63,10 +63,11 @@ export type CoachProposal =
 
 export type CoachChatMessage =
   | { id: string; kind: "user" | "error"; text: string; imageUri?: string }
-  | { id: string; kind: "coach"; text: string; quickReplies?: string[]; streaming?: boolean }
+  | { id: string; kind: "coach"; text: string; quickReplies?: string[]; streaming?: boolean; thought?: string }
   | { id: string; kind: "proposal"; proposalId: string };
 
 export type CoachTurn = {
   text: string;
   functionCalls: { id?: string; name: string; args: object }[];
+  thought?: string;
 };

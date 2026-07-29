@@ -381,7 +381,12 @@ function createRealCoachChatSession(context: CoachContext, options: CoachSession
       }
     ],
     toolConfig: { functionCallingConfig: { mode: FunctionCallingMode.AUTO } },
-    generationConfig: { temperature: 0.4 }
+    // Leave thinking at the model default. Setting thinkingBudget to 0 made the model stop
+    // calling remember altogether — it would reply "noted" and silently save nothing — so the
+    // reasoning budget is load-bearing for tool selection here, not just answer quality.
+    // includeThoughts only surfaces the reasoning summary for display — it does not itself
+    // change how much the model thinks, so it's independent of the thinkingBudget concern above.
+    generationConfig: { temperature: 0.4, thinkingConfig: { includeThoughts: true } }
   });
   const chat = model.startChat(options.history ? { history: options.history } : {});
 
@@ -389,6 +394,7 @@ function createRealCoachChatSession(context: CoachContext, options: CoachSession
     async send(request, onDelta) {
       try {
         const result = await chat.sendMessageStream(request);
+        let thought = "";
         for await (const chunk of result.stream) {
           try {
             const delta = chunk.text();
@@ -398,8 +404,24 @@ function createRealCoachChatSession(context: CoachContext, options: CoachSession
           } catch {
             // Blocked/empty content — a chunk can throw for the same reason as the final response.
           }
+          try {
+            const chunkThought = chunk.thoughtSummary?.();
+            if (chunkThought) {
+              thought += chunkThought;
+            }
+          } catch {
+            // Same reason as the text branch — a chunk can throw when content is blocked.
+          }
         }
         const response = await result.response;
+
+        if (!thought) {
+          try {
+            thought = response.thoughtSummary() ?? "";
+          } catch {
+            thought = "";
+          }
+        }
 
         let text = "";
         try {
@@ -416,7 +438,8 @@ function createRealCoachChatSession(context: CoachContext, options: CoachSession
           calls = [];
         }
 
-        return { text, functionCalls: calls };
+        // Capped because the whole chat snapshot goes into one AsyncStorage key.
+        return { text, functionCalls: calls, ...(thought ? { thought: thought.slice(0, 2000) } : {}) };
       } catch (error) {
         throw new AppError(
           error instanceof Error ? error.message : "Gemini coach chat failed.",

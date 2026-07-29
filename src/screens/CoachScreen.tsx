@@ -51,6 +51,7 @@ export function CoachScreen() {
   const [attachedImage, setAttachedImage] = useState<{ uri: string; base64: string; mimeType: string } | null>(null);
   const [cancelArmed, setCancelArmed] = useState(false);
   const [recordingPulse] = useState(() => new Animated.Value(1));
+  const [expandedThoughts, setExpandedThoughts] = useState<Record<string, boolean>>({});
   const listRef = useRef<FlatList<CoachChatMessage>>(null);
   const recordHoldRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -235,6 +236,23 @@ export function CoachScreen() {
             </View>
             {item.streaming ? <StreamingCaret /> : null}
           </View>
+          {item.thought && !item.streaming ? (
+            <View className="mt-1">
+              <Pressable
+                onPress={() => setExpandedThoughts((prev) => ({ ...prev, [item.id]: !prev[item.id] }))}
+                accessibilityRole="button"
+                accessibilityLabel={expandedThoughts[item.id] ? "Hide the coach's reasoning" : "Show the coach's reasoning"}
+                className="self-start rounded-full border border-zinc-200 bg-white px-3 py-1 dark:border-zinc-800 dark:bg-zinc-950"
+              >
+                <AppText variant="caption">{expandedThoughts[item.id] ? "Thought ▴" : "Thought ▾"}</AppText>
+              </Pressable>
+              {expandedThoughts[item.id] ? (
+                <View className="mt-1 max-w-[92%] self-start rounded-2xl bg-zinc-100 px-3 py-2 dark:bg-zinc-900">
+                  <AppText variant="caption">{item.thought}</AppText>
+                </View>
+              ) : null}
+            </View>
+          ) : null}
           {showChips ? (
             <View className="flex-row flex-wrap gap-2">
               {quickReplies.map((chip) => (

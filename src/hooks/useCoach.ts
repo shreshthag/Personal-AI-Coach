@@ -233,7 +233,7 @@ export function useCoachChat(getContext: () => CoachContext) {
     );
   }
 
-  function finalizeCoachText(raw: string): void {
+  function finalizeCoachText(raw: string, thought?: string): void {
     const { text, chips } = parseCoachText(raw);
     const streamMsgId = streamMsgIdRef.current;
     streamMsgIdRef.current = null;
@@ -249,15 +249,15 @@ export function useCoachChat(getContext: () => CoachContext) {
           if (message.id !== streamMsgId || message.kind !== "coach") {
             return message;
           }
-          const { streaming: _streaming, quickReplies: _quickReplies, ...settled } = message;
-          return { ...settled, text, ...(chips.length > 0 ? { quickReplies: chips } : {}) };
+          const { streaming: _streaming, quickReplies: _quickReplies, thought: _thought, ...settled } = message;
+          return { ...settled, text, ...(chips.length > 0 ? { quickReplies: chips } : {}), ...(thought ? { thought } : {}) };
         })
       );
       return;
     }
 
     if (text) {
-      applyMessages((prev) => [...prev, { id: createId("msg"), kind: "coach", text, ...(chips.length > 0 ? { quickReplies: chips } : {}) }]);
+      applyMessages((prev) => [...prev, { id: createId("msg"), kind: "coach", text, ...(chips.length > 0 ? { quickReplies: chips } : {}), ...(thought ? { thought } : {}) }]);
     }
   }
 
@@ -312,7 +312,7 @@ export function useCoachChat(getContext: () => CoachContext) {
   }
 
   async function handleTurn(turn: CoachTurn, epoch: number, session: CoachChatSession): Promise<void> {
-    finalizeCoachText(turn.text);
+    finalizeCoachText(turn.text, turn.thought);
 
     if (turn.functionCalls.length === 0) {
       await finishTurn(epoch, session);
@@ -332,7 +332,7 @@ export function useCoachChat(getContext: () => CoachContext) {
         if (epoch !== epochRef.current) {
           return;
         }
-        finalizeCoachText(closing.text);
+        finalizeCoachText(closing.text, closing.thought);
       } catch (sendError) {
         if (epoch !== epochRef.current) {
           return;
