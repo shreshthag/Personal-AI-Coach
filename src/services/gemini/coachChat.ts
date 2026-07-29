@@ -410,7 +410,9 @@ function createRealCoachChatSession(context: CoachContext, options: CoachSession
     // reasoning budget is load-bearing for tool selection here, not just answer quality.
     // includeThoughts only surfaces the reasoning summary for display — it does not itself
     // change how much the model thinks, so it's independent of the thinkingBudget concern above.
-    generationConfig: { temperature: 0.4, thinkingConfig: { includeThoughts: true } }
+    // thinkingBudget -1 is dynamic thinking, the same behaviour as leaving it unset; it is stated
+    // explicitly because includeThoughts returned no summary without an allocated budget.
+    generationConfig: { temperature: 0.4, thinkingConfig: { includeThoughts: true, thinkingBudget: -1 } }
   });
   const chat = model.startChat(options.history ? { history: options.history } : {});
 
