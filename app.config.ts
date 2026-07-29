@@ -15,7 +15,19 @@ const config: ExpoConfig = {
       foregroundImage: "./assets/adaptive-icon.png",
       backgroundColor: "#2E9E5B"
     },
-    permissions: ["READ_MEDIA_IMAGES"]
+    // The health.* permissions are Health Connect's own, and are how watch data reaches this
+    // app: Samsung Health syncs the watch into Health Connect, and we read from there. The
+    // library's config plugin only adds the permissions-rationale intent filter, not these.
+    permissions: [
+      "READ_MEDIA_IMAGES",
+      "android.permission.health.READ_STEPS",
+      "android.permission.health.READ_ACTIVE_CALORIES_BURNED",
+      "android.permission.health.READ_TOTAL_CALORIES_BURNED",
+      "android.permission.health.READ_SLEEP",
+      "android.permission.health.READ_EXERCISE",
+      "android.permission.health.READ_WEIGHT",
+      "android.permission.health.READ_BODY_FAT"
+    ]
   },
   ios: {
     bundleIdentifier: "com.personalainutrition.tracker",
@@ -28,6 +40,9 @@ const config: ExpoConfig = {
     "expo-dev-client",
     "expo-image-picker",
     "expo-speech-recognition",
+    "react-native-health-connect",
+    // Health Connect's client requires API 26; this project's default floor is 24.
+    ["expo-build-properties", { android: { minSdkVersion: 26 } }],
     "@react-native-google-signin/google-signin"
   ],
   extra: {
