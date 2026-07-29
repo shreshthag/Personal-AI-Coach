@@ -59,3 +59,11 @@ export const goalTargetsSchema = z.object({
   carbs: z.number().min(0).max(900),
   fat: z.number().min(20).max(300)
 });
+
+export const forgetArgsSchema = z.object({
+  memoryId: z.string().min(1)
+});
+
+export const memoryExtractionResponseSchema = z.object({
+  facts: z.array(z.string())
+});

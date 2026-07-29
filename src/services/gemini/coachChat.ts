@@ -114,6 +114,18 @@ const webSearchDeclaration = {
   })
 };
 
+const forgetDeclaration = {
+  name: "forget",
+  description:
+    "Delete a stored fact that is wrong or out of date. Executes immediately with no confirmation card. Use the exact memory id given in the WHAT I KNOW ABOUT YOU section.",
+  parameters: Schema.object({
+    properties: {
+      memoryId: Schema.string({ description: "The id of the memory to delete, taken exactly from WHAT I KNOW ABOUT YOU." })
+    },
+    optionalProperties: []
+  })
+};
+
 const updateGoalDeclaration = {
   name: "update_goal",
   description:
@@ -287,7 +299,8 @@ export function coachStaticSignature(context: CoachContext, today: DateKey): str
     context.profile,
     context.persona,
     context.coachName,
-    context.userName
+    context.userName,
+    context.memories
   ]);
 }
 
@@ -308,6 +321,7 @@ function buildCoachSystemInstruction(context: CoachContext, options: CoachSessio
     "- delete_meal: when I explicitly ask to remove a specific logged meal. Use the exact id and date from the newest MY DATA block — never guess.",
     "- delete_weight: when I explicitly ask to remove a weight entry for a specific date. Use the exact date from the newest MY DATA block — never guess.",
     "- web_search: search Google for facts you don't reliably know. Runs automatically and returns a grounded answer — no confirmation card.",
+    "- forget: delete a fact that is wrong or out of date, using its exact id from WHAT I KNOW ABOUT YOU.",
 
     "When you propose an action that produces a confirmation card (log_meal, log_weight, update_goal), write a line or two alongside it — acknowledge the food or weight and give your estimate — so the card never arrives with no message. This does NOT apply to web_search: run it silently. Never announce that you are about to search, never narrate what you are checking, and never send a message whose only content is that you are looking something up.",
 
@@ -317,7 +331,10 @@ function buildCoachSystemInstruction(context: CoachContext, options: CoachSessio
     "- Never say something was logged or deleted unless the tool response says ok: true. When a response has queuedOffline: true, tell me it saved on my phone and will sync once I'm back online.",
     "- When a tool response carries totals, quote those numbers as-is instead of recomputing them.",
     "- Some of my messages open with a bracketed block telling you what happened to the cards you last proposed. The app writes that block, not me, and it is the authoritative record: anything it says was saved is already done and already counted in MY DATA — never propose it again and never add it to a total yourself — and anything it says was dismissed was not saved.",
-    "- If I decline a suggestion or an action fails, accept it gracefully without pushback.",
+    "- When that block says a card was not saved, do not assume I refused it. Read what I actually said: if my message names a different meal, quantity, item or date, it is a correction — re-propose the very same food with that one detail changed, reusing your earlier estimates rather than starting over or asking me to repeat myself. A single word like \"breakfast\" straight after a card is a correction, not a new question.",
+    "- Only a clear refusal — \"cancel\", \"no\", \"forget it\", \"don't log that\" — means drop it. Then accept it gracefully without pushback. A correction is not a refusal.",
+    "- Always reply in ordinary words, whatever tools you called, and never send me an empty turn. Everything you write to me is plain conversation — never show me code, function syntax or your own working out.",
+    "- You do not store facts yourself — the app notices durable ones automatically from what I tell you, and they appear in WHAT I KNOW ABOUT YOU next time. If something I say contradicts a stored fact, call forget on the old id so the wrong version stops being used.",
 
     `MY PHASE: my goal carries a free-text mode describing my current phase — right now it is "${context.goals.mode}". It decides whether my calorie target is a ceiling or a floor, and that governs how you word "calories remaining", "within goal" and "exceeded" everywhere below.`,
     "- Cutting: the target is a ceiling — help me stay at or under it.",
@@ -349,7 +366,13 @@ function buildCoachSystemInstruction(context: CoachContext, options: CoachSessio
     "CHIPS: when a useful follow-up would help, end your reply with [[chips: First option | Second option | Third option]] — at most 3 short choices. Everything from the first [[ onward is stripped before I see it, so write the marker at most once, as the very last thing in the reply, never write [[ anywhere else, and never put | or ] inside a chip label. Do not add chips when a confirmation card is pending; it already has its own buttons.",
 
     "MY DATA: every message I send begins with a bracketed MY DATA block holding my current numbers — calories in kcal, macros in grams, weight in kg, height in cm. The newest block is the only one that counts: it is a fresh snapshot from the app and it SUPERSEDES every earlier MY DATA block in this conversation, so ignore the figures in older ones entirely. Use the ids and dates in it exactly as given when calling the delete tools.",
-    `Unchanging reference for this conversation — my goal and body profile: ${JSON.stringify({ goals: context.goals, profile: context.profile })}`
+    `Unchanging reference for this conversation — my goal and body profile: ${JSON.stringify({ goals: context.goals, profile: context.profile })}`,
+    // Memories are small and stable, so they live in the static instruction to stay inside Gemini's cached prefix — unlike MY DATA, which changes every turn and rides in the per-turn data block instead.
+    context.memories.length > 0
+      ? `WHAT I KNOW ABOUT YOU — durable facts from earlier conversations. Treat them as true unless the user corrects them, and use the figures in them instead of estimating. Each line is "id | fact"; pass that id to forget when a fact stops being true:\n${context.memories
+          .map((memory) => `- ${memory.id} | ${memory.text}`)
+          .join("\n")}`
+      : "WHAT I KNOW ABOUT YOU: nothing stored yet. The app will start noticing durable facts as I mention them."
   ].join("\n");
 }
 
@@ -376,7 +399,8 @@ function createRealCoachChatSession(context: CoachContext, options: CoachSession
           deleteMealDeclaration,
           deleteWeightDeclaration,
           updateGoalDeclaration,
-          webSearchDeclaration
+          webSearchDeclaration,
+          forgetDeclaration
         ]
       }
     ],

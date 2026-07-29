@@ -28,6 +28,10 @@ service cloud.firestore {
       match /weightEntries/{date} {
         allow read, create, update, delete: if owns(uid);
       }
+
+      match /memories/{memoryId} {
+        allow read, create, update, delete: if owns(uid);
+      }
     }
   }
 }

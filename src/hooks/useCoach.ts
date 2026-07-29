@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { Content, FunctionResponsePart, Part } from "firebase/ai";
 
 import type { CoachChatMessage, CoachContext, CoachGoalProposalData, CoachProposal, CoachTurn } from "../models/gemini";
+import type { CoachMemory } from "../models/memory";
 import type { DateKey } from "../models/nutrition";
 import { clearCoachChat, readCoachChat, saveCoachChat } from "../services/cache/coachChatCache";
 import {
@@ -11,9 +12,11 @@ import {
   runWebSearch,
   type CoachChatSession
 } from "../services/gemini/coachChat";
+import { extractMemories } from "../services/gemini/memoryExtractor";
 import {
   deleteMealArgsSchema,
   deleteWeightArgsSchema,
+  forgetArgsSchema,
   logMealArgsSchema,
   logWeightArgsSchema,
   updateGoalArgsSchema,
@@ -26,6 +29,7 @@ import { buildMealTotals, computeTargets } from "../utils/nutrition";
 import { useAddMeal, useDeleteMealEntry } from "./useDailyMeals";
 import { useAuth } from "./useAuth";
 import { useUpdateGoals } from "./useGoals";
+import { useDeleteMemory, useSaveMemory } from "./useMemories";
 import { useDeleteWeight, useSaveWeight } from "./useWeight";
 
 type CoachChatStatus = "idle" | "waitingForModel" | "awaitingConfirmation";
@@ -63,8 +67,24 @@ function buildResponsePart(call: { id?: string; name: string }, response: object
 function sanitizeHistoryForPersistence(history: Content[]): Content[] {
   return history.map((content) => ({
     ...content,
-    parts: content.parts.map((part) => (part.inlineData ? { text: "[photo]" } : part))
+    // A turn that produced only a tool call can come back from getHistory with no parts at
+    // all, and mapping over that used to throw while persisting.
+    parts: (content.parts ?? []).map((part) => (part.inlineData ? { text: "[photo]" } : part))
   }));
+}
+
+function describeProposalSubject(proposal: CoachProposal): string {
+  if (proposal.tool === "log_meal") {
+    const items = proposal.meal.foods.map((food) => `${food.name} (${food.quantity})`).join(", ");
+    return `logging ${proposal.meal.mealType} on ${proposal.meal.date} — ${items}`;
+  }
+  if (proposal.tool === "log_weight") {
+    return `logging ${proposal.weight.weightKg} kg on ${proposal.weight.date}`;
+  }
+  if (proposal.tool === "update_goal") {
+    return `changing the goal to ${proposal.goal.calories} kcal, mode ${proposal.goal.mode}`;
+  }
+  return `the ${proposal.tool} action`;
 }
 
 function describeProposalOutcome(proposal: CoachProposal): string {
@@ -80,10 +100,19 @@ function describeProposalOutcome(proposal: CoachProposal): string {
       return `Your goal-change suggestion was accepted and saved.`;
     }
   }
+  // Unsaved cards spell out what was on them. Without this the coach only learns that "a
+  // log_meal was dismissed", which is not enough to re-propose when the user was correcting
+  // one detail rather than refusing the whole thing.
+  const subject = describeProposalSubject(proposal);
   if (proposal.status === "failed") {
-    return `Saving your ${proposal.tool} suggestion failed — nothing was saved.`;
+    return `Your card for ${subject} failed to save — nothing was stored.`;
   }
-  return `The user dismissed your ${proposal.tool} suggestion — nothing was saved.`;
+  return `Your card for ${subject} was not saved: the user typed something else instead of confirming it.`;
+}
+
+// Loose comparison so a re-worded restatement of a fact we already hold doesn't get stored twice.
+function normalizeFact(text: string): string {
+  return text.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 }
 
 export function parseCoachText(raw: string): { text: string; chips: string[] } {
@@ -113,6 +142,8 @@ export function useCoachChat(getContext: () => CoachContext) {
   const deleteMealEntry = useDeleteMealEntry();
   const deleteWeight = useDeleteWeight();
   const updateGoals = useUpdateGoals();
+  const saveMemory = useSaveMemory();
+  const deleteMemory = useDeleteMemory();
 
   const [messages, setMessages] = useState<CoachChatMessage[]>([]);
   const [proposals, setProposals] = useState<Record<string, CoachProposal>>({});
@@ -184,7 +215,7 @@ export function useCoachChat(getContext: () => CoachContext) {
       // session starts from a clean turn boundary.
       const restoredHistory = snapshot.history.filter((content, index) => {
         const isLast = index === snapshot.history.length - 1;
-        return !(isLast && content.parts.some((part) => part.functionCall != null));
+        return !(isLast && (content.parts ?? []).some((part) => part.functionCall != null));
       });
       historyRef.current = restoredHistory;
       lastActiveDateRef.current = snapshot.lastActiveDate ?? null;
@@ -531,6 +562,30 @@ export function useCoachChat(getContext: () => CoachContext) {
             })
           );
         }
+      } else if (call.name === "forget") {
+        const parsed = forgetArgsSchema.safeParse(call.args);
+        if (parsed.success) {
+          // Deletes straight through with no card and no model turn.
+          void (async () => {
+            try {
+              await deleteMemory.mutateAsync({ memoryId: parsed.data.memoryId });
+              pendingOutcomesRef.current = [...pendingOutcomesRef.current, `Forgot the memory with id ${parsed.data.memoryId}.`];
+            } catch {
+              pendingOutcomesRef.current = [
+                ...pendingOutcomesRef.current,
+                `Could not delete the memory with id ${parsed.data.memoryId}.`
+              ];
+            }
+            batch.responses.set(index, buildResponsePart(call, { ok: true }));
+            persistSnapshot();
+          })();
+        } else {
+          batch.autoFlush = true;
+          batch.responses.set(
+            index,
+            buildResponsePart(call, { ok: false, error: `Invalid arguments: ${parsed.error.issues.map((issue) => issue.message).join("; ")}` })
+          );
+        }
       } else {
         batch.responses.set(index, buildResponsePart(call, { ok: false, error: `Unknown tool: ${call.name}` }));
       }
@@ -546,17 +601,17 @@ export function useCoachChat(getContext: () => CoachContext) {
       void runProposal(proposalId, epoch, session);
     });
 
-    if (batch.slotByProposalId.size === 0) {
-      // Every call resolved immediately (validation/unknown-tool failures) — no
-      // user action to wait for, flush right away.
-      await maybeFlushBatch(epoch, session);
+    if (batch.autoFlush) {
+      if (batch.slotByProposalId.size === 0) {
+        // Every call resolved immediately — no user action to wait for, flush right away.
+        await maybeFlushBatch(epoch, session);
+      }
+      return;
     }
 
-    if (pendingCount > 0 && !batch.autoFlush) {
-      // Pure-proposal batch: the pill is on screen and the user can keep chatting. The
-      // function responses stay in batchRef and ride along with their next message.
-      await finishTurn(epoch, session);
-    }
+    // Nothing left in this batch needs a model turn: pills wait on the user, and memory
+    // writes already went through. End the turn so the input frees up.
+    await finishTurn(epoch, session);
   }
 
   async function maybeFlushBatch(epoch: number, session: CoachChatSession): Promise<void> {
@@ -604,6 +659,30 @@ export function useCoachChat(getContext: () => CoachContext) {
     return outcomes;
   }
 
+  // Runs beside the chat turn and is deliberately not awaited, so capture never delays the reply.
+  // Not epoch-guarded either: a fact the user stated stays true even if they reset the chat.
+  function runMemoryExtraction(message: string, existing: CoachMemory[], learnedOn: DateKey): void {
+    void (async () => {
+      const facts = await extractMemories(
+        message,
+        existing.map((memory) => memory.text)
+      );
+      const known = new Set(existing.map((memory) => normalizeFact(memory.text)));
+      for (const fact of facts) {
+        const key = normalizeFact(fact);
+        if (known.has(key)) {
+          continue;
+        }
+        known.add(key);
+        try {
+          await saveMemory.mutateAsync({ text: fact, learnedOn });
+        } catch {
+          // The fact simply isn't stored; nothing else to do.
+        }
+      }
+    })();
+  }
+
   async function sendMessage(text: string, image?: { uri: string; base64: string; mimeType: string }): Promise<void> {
     if (statusRef.current !== "idle") {
       return;
@@ -639,6 +718,8 @@ export function useCoachChat(getContext: () => CoachContext) {
     roundRef.current = 0;
     setError(null);
     applyStatus("waitingForModel");
+    // The user's own words only — the data block and outcome notes must never reach the extractor.
+    runMemoryExtraction(trimmed, context.memories, today);
     try {
       beginStreamingTurn();
       const turn = await session.send(request, (delta) => handleStreamDelta(delta, epoch));

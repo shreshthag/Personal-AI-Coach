@@ -1,5 +1,6 @@
 import type { DateKey, FoodItem, Goals, Meal, MealType, WeightEntry } from "./nutrition";
 import type { BodyProfile } from "./user";
+import type { CoachMemory } from "./memory";
 
 export type GeminiMealAnalysis = {
   foods: FoodItem[];
@@ -18,6 +19,7 @@ export type CoachContext = {
   coachName: string;
   persona: string;
   profile: BodyProfile | null;
+  memories: CoachMemory[];
 };
 
 export type CoachMealProposalData = {
