@@ -182,8 +182,17 @@ export function GoalsScreen({ navigation }: GoalsScreenProps) {
     setError(null);
     setMessage(null);
     try {
-      await requestHealthPermissions.mutateAsync();
-      setMessage("Connected.");
+      // The request resolves with the resulting status rather than throwing, so a denial looks
+      // like success here. Report what actually came back — claiming "Connected" when nothing
+      // was granted just sends you hunting for missing data later.
+      const status = await requestHealthPermissions.mutateAsync();
+      if (status === "ok") {
+        setMessage("Connected.");
+      } else if (status === "unavailable") {
+        setError("Health Connect isn't available on this device.");
+      } else {
+        setError("Access wasn't granted, so no watch data will be read.");
+      }
     } catch (saveError) {
       setError(toFriendlyError(saveError, "Could not connect to Health Connect. Please retry."));
     }

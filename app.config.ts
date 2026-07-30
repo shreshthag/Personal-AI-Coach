@@ -41,6 +41,7 @@ const config: ExpoConfig = {
     "expo-image-picker",
     "expo-speech-recognition",
     "react-native-health-connect",
+    "./plugins/withHealthConnectPermissionDelegate",
     // Health Connect's client requires API 26; this project's default floor is 24.
     ["expo-build-properties", { android: { minSdkVersion: 26 } }],
     "@react-native-google-signin/google-signin"
