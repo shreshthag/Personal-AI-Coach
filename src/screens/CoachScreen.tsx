@@ -17,6 +17,7 @@ import { useAuth } from "../hooks/useAuth";
 import { useCoachChat } from "../hooks/useCoach";
 import { useDailyMeals } from "../hooks/useDailyMeals";
 import { useGoals } from "../hooks/useGoals";
+import { useHealthData } from "../hooks/useHealthData";
 import { useMemories } from "../hooks/useMemories";
 import { useBodyProfile, useCoachSetup } from "../hooks/useUserProfile";
 import { useVoiceInput } from "../hooks/useVoiceInput";
@@ -48,6 +49,7 @@ export function CoachScreen() {
   const setup = useCoachSetup();
   const profileQuery = useBodyProfile();
   const memories = useMemories();
+  const health = useHealthData(today);
   const voice = useVoiceInput();
   const [draft, setDraft] = useState("");
   const [attachedImage, setAttachedImage] = useState<{ uri: string; base64: string; mimeType: string } | null>(null);
@@ -82,7 +84,8 @@ export function CoachScreen() {
       coachName: setup.data?.coachName ?? "Coach",
       persona: setup.data?.persona ?? defaultPersonaKey,
       profile: profileQuery.data ?? null,
-      memories: memories.data ?? []
+      memories: memories.data ?? [],
+      health: health.data ?? null
     }),
     [
       todayMeals.data,
@@ -93,7 +96,8 @@ export function CoachScreen() {
       setup.data,
       user?.displayName,
       profileQuery.data,
-      memories.data
+      memories.data,
+      health.data
     ]
   );
 

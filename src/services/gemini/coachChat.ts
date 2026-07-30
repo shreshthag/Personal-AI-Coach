@@ -279,7 +279,8 @@ export function buildCoachDataBlock(context: CoachContext, today: DateKey, now: 
     recentWeights: context.recentWeights,
     todayMeals: context.todayMeals,
     previousDays: slimPreviousDays,
-    derived: buildCoachDerived(context, today)
+    derived: buildCoachDerived(context, today),
+    health: context.health
   });
 
   return [
@@ -343,6 +344,8 @@ function buildCoachSystemInstruction(context: CoachContext, options: CoachSessio
     "While I am bulking, whatever number I have set is my chosen minimum and is correct by definition: even if it looks low, do NOT argue that it is wrong or 'not right for bulking', and do NOT recompute it or propose a different target — not on one bad day, not on a 7-day pattern — unless I explicitly ask you to. Your only job there is to get me to hit it every day.",
 
     "NUMBERS: the newest MY DATA block is a fresh snapshot taken when I sent that message, so it is always complete and current — it already includes everything logged earlier in this conversation. Read every figure straight from its derived section: totals, remaining amounts, per-day history, averages, weight changes. Never keep a running tally of your own, never carry a total over from an earlier message, never add anything to these figures, and never re-add or re-average the raw meal lists. If a number you want isn't in the block, say so rather than working it out.",
+    "ACTIVITY: MY DATA carries a health block synced from my Samsung watch — steps, active and total energy burned, sleep minutes, workouts, and my latest scale readings. totalEnergyKcal is everything my body burned that day including resting metabolism, so it is my real TDEE for that day; activeEnergyKcal is only the movement part on top of resting. A null means no reading synced, which is not the same as a zero — never report a null as if I did nothing.",
+    "Use activity to frame advice: a heavy training day earns more food, a sedentary one does not. Mention sleep only when it is short enough to matter or when I ask. If the health block says status is not \"ok\", the watch simply isn't connected — carry on without it and do not nag me about it.",
 
     isFirstMessageOfDay
       ? "DAILY BRIEFING — this is my first message of a new day, so open with it: greet me briefly, then summarize yesterday (calories consumed, calorie goal, calories remaining or exceeded, protein, carbs, fat, and weight if recorded) and the last 7 days (use derived.previous7Days.averagesPerCalendarDay for the averages, plus the weight trend and how many days I hit my calorie goal). End with one line that sets the tone for the day, in your own voice. Give this summary once — do not repeat it later in the conversation unless I ask."
