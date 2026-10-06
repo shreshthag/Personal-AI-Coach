@@ -12,6 +12,7 @@ import { ScreenShell } from "../components/ScreenShell";
 import { TextField } from "../components/TextField";
 import { personas, type PersonaKey } from "../constants/personas";
 import { useGoals, useUpdateGoals } from "../hooks/useGoals";
+import { useHealthData, useRequestHealthPermissions } from "../hooks/useHealthData";
 import { useBodyProfile, useCoachSetup, useSaveBodyProfile, useSaveCoachSetup } from "../hooks/useUserProfile";
 import { useWeights } from "../hooks/useWeight";
 import type { Goals } from "../models/nutrition";
@@ -47,6 +48,8 @@ export function GoalsScreen({ navigation }: GoalsScreenProps) {
   const saveCoachSetup = useSaveCoachSetup();
   const weights = useWeights(today);
   const latestWeightKg = weights.data.at(-1)?.weightKg;
+  const health = useHealthData(today);
+  const requestHealthPermissions = useRequestHealthPermissions();
 
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -172,6 +175,26 @@ export function GoalsScreen({ navigation }: GoalsScreenProps) {
       setMessage("Coach saved.");
     } catch (saveError) {
       setError(toFriendlyError(saveError, "Could not save your coach. Please retry."));
+    }
+  }
+
+  async function submitHealthConnect() {
+    setError(null);
+    setMessage(null);
+    try {
+      // The request resolves with the resulting status rather than throwing, so a denial looks
+      // like success here. Report what actually came back — claiming "Connected" when nothing
+      // was granted just sends you hunting for missing data later.
+      const status = await requestHealthPermissions.mutateAsync();
+      if (status === "ok") {
+        setMessage("Connected.");
+      } else if (status === "unavailable") {
+        setError("Health Connect isn't available on this device.");
+      } else {
+        setError("Access wasn't granted, so no watch data will be read.");
+      }
+    } catch (saveError) {
+      setError(toFriendlyError(saveError, "Could not connect to Health Connect. Please retry."));
     }
   }
 
@@ -375,6 +398,24 @@ export function GoalsScreen({ navigation }: GoalsScreenProps) {
           accessibilityLabel="Save coach setup"
         />
         <AppText variant="caption">Changes apply from your next chat.</AppText>
+      </Card>
+
+      <Card className="gap-4" accessibilityLabel="Samsung watch connection settings">
+        <AppText variant="subtitle">Samsung watch</AppText>
+        <AppText variant="caption">
+          {health.data?.status === "ok"
+            ? "Connected"
+            : health.data?.status === "unavailable"
+              ? "Health Connect isn't available on this device"
+              : "Not connected — tap to allow access"}
+        </AppText>
+        <Button
+          title="Connect"
+          loading={requestHealthPermissions.isPending}
+          disabled={health.data?.status === "ok" || health.data?.status === "unavailable"}
+          onPress={submitHealthConnect}
+          accessibilityLabel="Connect Samsung watch via Health Connect"
+        />
       </Card>
 
       {message ? <Notice tone="success" title="Saved" message={message} /> : null}

@@ -1,5 +1,7 @@
 import type { DateKey, FoodItem, Goals, Meal, MealType, WeightEntry } from "./nutrition";
 import type { BodyProfile } from "./user";
+import type { CoachMemory } from "./memory";
+import type { HealthSnapshot } from "./health";
 
 export type GeminiMealAnalysis = {
   foods: FoodItem[];
@@ -18,6 +20,8 @@ export type CoachContext = {
   coachName: string;
   persona: string;
   profile: BodyProfile | null;
+  memories: CoachMemory[];
+  health: HealthSnapshot | null;
 };
 
 export type CoachMealProposalData = {
@@ -63,10 +67,11 @@ export type CoachProposal =
 
 export type CoachChatMessage =
   | { id: string; kind: "user" | "error"; text: string; imageUri?: string }
-  | { id: string; kind: "coach"; text: string; quickReplies?: string[]; streaming?: boolean }
+  | { id: string; kind: "coach"; text: string; quickReplies?: string[]; streaming?: boolean; thought?: string }
   | { id: string; kind: "proposal"; proposalId: string };
 
 export type CoachTurn = {
   text: string;
   functionCalls: { id?: string; name: string; args: object }[];
+  thought?: string;
 };

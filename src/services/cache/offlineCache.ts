@@ -2,6 +2,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 
 import type { Goals, Meal, MealDraft, WeightEntry } from "../../models/nutrition";
 import type { BodyProfile } from "../../models/user";
+import type { CoachMemory } from "../../models/memory";
 
 const key = {
   dailyMeals: (uid: string, date: string) => `daily-meals:${uid}:${date}`,
@@ -9,6 +10,7 @@ const key = {
   goals: (uid: string) => `goals:${uid}`,
   coachSetup: (uid: string) => `coach-setup:${uid}`,
   bodyProfile: (uid: string) => `body-profile:${uid}`,
+  memories: (uid: string) => `memories:${uid}`,
   queue: "offline-mutation-queue"
 };
 
@@ -111,6 +113,24 @@ export async function cacheBodyProfile(uid: string, profile: BodyProfile): Promi
 export async function readCachedBodyProfile(uid: string): Promise<BodyProfile | null> {
   const raw = await AsyncStorage.getItem(key.bodyProfile(uid));
   return raw ? (JSON.parse(raw) as BodyProfile) : null;
+}
+
+export async function getMemoriesLocal(uid: string): Promise<CoachMemory[]> {
+  const raw = await AsyncStorage.getItem(key.memories(uid));
+  return raw ? (JSON.parse(raw) as CoachMemory[]) : [];
+}
+
+export async function saveMemoryLocal(uid: string, memory: CoachMemory): Promise<void> {
+  const memories = await getMemoriesLocal(uid);
+  const withoutDuplicate = memories.filter((item) => item.id !== memory.id);
+  const next = [...withoutDuplicate, memory];
+  await AsyncStorage.setItem(key.memories(uid), JSON.stringify(next));
+}
+
+export async function deleteMemoryLocal(uid: string, id: string): Promise<void> {
+  const memories = await getMemoriesLocal(uid);
+  const next = memories.filter((item) => item.id !== id);
+  await AsyncStorage.setItem(key.memories(uid), JSON.stringify(next));
 }
 
 export async function queuePendingWrite(write: PendingWrite): Promise<void> {

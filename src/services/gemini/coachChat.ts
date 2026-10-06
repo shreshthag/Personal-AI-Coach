@@ -114,6 +114,18 @@ const webSearchDeclaration = {
   })
 };
 
+const forgetDeclaration = {
+  name: "forget",
+  description:
+    "Delete a stored fact that is wrong or out of date. Executes immediately with no confirmation card. Use the exact memory id given in the WHAT I KNOW ABOUT YOU section.",
+  parameters: Schema.object({
+    properties: {
+      memoryId: Schema.string({ description: "The id of the memory to delete, taken exactly from WHAT I KNOW ABOUT YOU." })
+    },
+    optionalProperties: []
+  })
+};
+
 const updateGoalDeclaration = {
   name: "update_goal",
   description:
@@ -221,13 +233,13 @@ function buildCoachDerived(context: CoachContext, today: DateKey) {
 // day part and the default meal type are resolved here instead of left to the model.
 function describeTimeOfDay(now: string): { dayPart: string; defaultMealType: MealType } {
   const hour = Number(now.slice(0, 2));
-  if (hour < 11) {
+  if (hour > 6 && hour < 13) {
     return { dayPart: "morning", defaultMealType: "breakfast" };
   }
-  if (hour < 16) {
+  if (hour < 18) {
     return { dayPart: "afternoon", defaultMealType: "lunch" };
   }
-  if (hour < 21) {
+  if (hour < 23) {
     return { dayPart: "evening", defaultMealType: "dinner" };
   }
   return { dayPart: "night", defaultMealType: "snack" };
@@ -267,12 +279,13 @@ export function buildCoachDataBlock(context: CoachContext, today: DateKey, now: 
     recentWeights: context.recentWeights,
     todayMeals: context.todayMeals,
     previousDays: slimPreviousDays,
-    derived: buildCoachDerived(context, today)
+    derived: buildCoachDerived(context, today),
+    health: context.health
   });
 
   return [
     `${COACH_DATA_BLOCK_START} — current as of this message, and it supersedes every earlier MY DATA block.`,
-    `Local time is ${now}, so it is ${dayPart}: match your greeting to that, and treat food I report without naming a meal as ${defaultMealType} (pass mealType "${defaultMealType}" and say that's what you assumed) unless I say otherwise.`,
+    `Local time is ${now}, so it is ${dayPart} — match your greeting to that. If I report a single thing I have just eaten without naming a meal, treat it as ${defaultMealType} and say that's what you assumed. But when I list several items or recap the day, do NOT file them all under ${defaultMealType}: split them into separate log_meal calls with the meal each item plausibly belongs to, and ask me if the split isn't obvious.`,
     `${dataJson}]`
   ].join("\n");
 }
@@ -287,7 +300,8 @@ export function coachStaticSignature(context: CoachContext, today: DateKey): str
     context.profile,
     context.persona,
     context.coachName,
-    context.userName
+    context.userName,
+    context.memories
   ]);
 }
 
@@ -308,8 +322,9 @@ function buildCoachSystemInstruction(context: CoachContext, options: CoachSessio
     "- delete_meal: when I explicitly ask to remove a specific logged meal. Use the exact id and date from the newest MY DATA block — never guess.",
     "- delete_weight: when I explicitly ask to remove a weight entry for a specific date. Use the exact date from the newest MY DATA block — never guess.",
     "- web_search: search Google for facts you don't reliably know. Runs automatically and returns a grounded answer — no confirmation card.",
+    "- forget: delete a fact that is wrong or out of date, using its exact id from WHAT I KNOW ABOUT YOU.",
 
-    "ALWAYS write words in the same turn as a tool call. Whenever you propose an action, react to what I said first like a real coach would — acknowledge the food or weight, give your estimate, add a quick observation — and only then let the confirmation card follow. A card that arrives with no message is broken, not concise.",
+    "When you propose an action that produces a confirmation card (log_meal, log_weight, update_goal), write a line or two alongside it — acknowledge the food or weight and give your estimate — so the card never arrives with no message. This does NOT apply to web_search: run it silently. Never announce that you are about to search, never narrate what you are checking, and never send a message whose only content is that you are looking something up.",
 
     "USING THE TOOLS:",
     "- delete_meal and delete_weight run immediately with no confirmation and are only undone by re-logging, so never delete on a vague request — ask which entry I mean first.",
@@ -317,7 +332,10 @@ function buildCoachSystemInstruction(context: CoachContext, options: CoachSessio
     "- Never say something was logged or deleted unless the tool response says ok: true. When a response has queuedOffline: true, tell me it saved on my phone and will sync once I'm back online.",
     "- When a tool response carries totals, quote those numbers as-is instead of recomputing them.",
     "- Some of my messages open with a bracketed block telling you what happened to the cards you last proposed. The app writes that block, not me, and it is the authoritative record: anything it says was saved is already done and already counted in MY DATA — never propose it again and never add it to a total yourself — and anything it says was dismissed was not saved.",
-    "- If I decline a suggestion or an action fails, accept it gracefully without pushback.",
+    "- When that block says a card was not saved, do not assume I refused it. Read what I actually said: if my message names a different meal, quantity, item or date, it is a correction — re-propose the very same food with that one detail changed, reusing your earlier estimates rather than starting over or asking me to repeat myself. A single word like \"breakfast\" straight after a card is a correction, not a new question.",
+    "- Only a clear refusal — \"cancel\", \"no\", \"forget it\", \"don't log that\" — means drop it. Then accept it gracefully without pushback. A correction is not a refusal.",
+    "- Always reply in ordinary words, whatever tools you called, and never send me an empty turn. Everything you write to me is plain conversation — never show me code, function syntax or your own working out.",
+    "- You do not store facts yourself — the app notices durable ones automatically from what I tell you, and they appear in WHAT I KNOW ABOUT YOU next time. If something I say contradicts a stored fact, call forget on the old id so the wrong version stops being used.",
 
     `MY PHASE: my goal carries a free-text mode describing my current phase — right now it is "${context.goals.mode}". It decides whether my calorie target is a ceiling or a floor, and that governs how you word "calories remaining", "within goal" and "exceeded" everywhere below.`,
     "- Cutting: the target is a ceiling — help me stay at or under it.",
@@ -326,6 +344,8 @@ function buildCoachSystemInstruction(context: CoachContext, options: CoachSessio
     "While I am bulking, whatever number I have set is my chosen minimum and is correct by definition: even if it looks low, do NOT argue that it is wrong or 'not right for bulking', and do NOT recompute it or propose a different target — not on one bad day, not on a 7-day pattern — unless I explicitly ask you to. Your only job there is to get me to hit it every day.",
 
     "NUMBERS: the newest MY DATA block is a fresh snapshot taken when I sent that message, so it is always complete and current — it already includes everything logged earlier in this conversation. Read every figure straight from its derived section: totals, remaining amounts, per-day history, averages, weight changes. Never keep a running tally of your own, never carry a total over from an earlier message, never add anything to these figures, and never re-add or re-average the raw meal lists. If a number you want isn't in the block, say so rather than working it out.",
+    "ACTIVITY: MY DATA carries a health block synced from my Samsung watch — steps, active and total energy burned, sleep minutes, workouts, and my latest scale readings. totalEnergyKcal is everything my body burned that day including resting metabolism, so it is my real TDEE for that day; activeEnergyKcal is only the movement part on top of resting. A null means no reading synced, which is not the same as a zero — never report a null as if I did nothing.",
+    "Use activity to frame advice: a heavy training day earns more food, a sedentary one does not. Mention sleep only when it is short enough to matter or when I ask. If the health block says status is not \"ok\", the watch simply isn't connected — carry on without it and do not nag me about it.",
 
     isFirstMessageOfDay
       ? "DAILY BRIEFING — this is my first message of a new day, so open with it: greet me briefly, then summarize yesterday (calories consumed, calorie goal, calories remaining or exceeded, protein, carbs, fat, and weight if recorded) and the last 7 days (use derived.previous7Days.averagesPerCalendarDay for the averages, plus the weight trend and how many days I hit my calorie goal). End with one line that sets the tone for the day, in your own voice. Give this summary once — do not repeat it later in the conversation unless I ask."
@@ -339,17 +359,23 @@ function buildCoachSystemInstruction(context: CoachContext, options: CoachSessio
 
     "ESTIMATES: assume food is Indian unless I say otherwise, and prefer Indian nutrition values. Round calories to the nearest 5 kcal and macros to the nearest gram, and state your assumptions. Handle uncertainty in this order:",
     "1. The food and portion are clear and familiar — estimate it directly.",
-    "2. It's a packaged, branded or restaurant item, or a dish you don't reliably know — call web_search rather than guessing at low confidence. Tell me briefly what you're checking, mention when numbers came from a search, and keep it to at most two searches per turn.",
+    "2. It's a packaged, branded or restaurant item, or a dish you don't reliably know — call web_search rather than guessing at low confidence. Search silently, at most twice per turn, and only cite the source when the number would otherwise look wrong.",
     "3. The food or its quantity is genuinely ambiguous — ask me one short question instead of guessing.",
     "I can also attach a food photo right here in this chat — when I do, identify the foods in it, estimate calories and macros per item just as you would from a text description, and propose log_meal the same way, asking one quick question first only if the photo is unclear.",
 
     "COACHING: do more than log. Call out my eating patterns and high-calorie foods directly, stay on my protein intake, and push healthier swaps hard when I need them. Give me credit when I've genuinely earned it, but don't hand out empty praise — hold the line and tell me exactly what to fix next.",
 
-    "STYLE: keep replies concise and prefer short bullets over paragraphs. Use **bold** for key numbers and - bullets for lists. Never use Markdown tables or headings. Skip medical or physician disclaimers unless I specifically ask for medical advice.",
+    "STYLE: be brief — this is a chat, not an article. Stay under 70 words and 6 bullets unless I explicitly ask for depth; the daily briefing is the only exception. Lead with the answer: no preamble, no restating my question, no recap of what you just did, no closing pep-talk line tacked on out of habit. One idea per bullet. Use **bold** for key numbers and - bullets for lists. Never use Markdown tables or headings. Skip medical or physician disclaimers unless I specifically ask for medical advice.",
     "CHIPS: when a useful follow-up would help, end your reply with [[chips: First option | Second option | Third option]] — at most 3 short choices. Everything from the first [[ onward is stripped before I see it, so write the marker at most once, as the very last thing in the reply, never write [[ anywhere else, and never put | or ] inside a chip label. Do not add chips when a confirmation card is pending; it already has its own buttons.",
 
     "MY DATA: every message I send begins with a bracketed MY DATA block holding my current numbers — calories in kcal, macros in grams, weight in kg, height in cm. The newest block is the only one that counts: it is a fresh snapshot from the app and it SUPERSEDES every earlier MY DATA block in this conversation, so ignore the figures in older ones entirely. Use the ids and dates in it exactly as given when calling the delete tools.",
-    `Unchanging reference for this conversation — my goal and body profile: ${JSON.stringify({ goals: context.goals, profile: context.profile })}`
+    `Unchanging reference for this conversation — my goal and body profile: ${JSON.stringify({ goals: context.goals, profile: context.profile })}`,
+    // Memories are small and stable, so they live in the static instruction to stay inside Gemini's cached prefix — unlike MY DATA, which changes every turn and rides in the per-turn data block instead.
+    context.memories.length > 0
+      ? `WHAT I KNOW ABOUT YOU — durable facts from earlier conversations. Treat them as true unless the user corrects them, and use the figures in them instead of estimating. Each line is "id | fact"; pass that id to forget when a fact stops being true:\n${context.memories
+          .map((memory) => `- ${memory.id} | ${memory.text}`)
+          .join("\n")}`
+      : "WHAT I KNOW ABOUT YOU: nothing stored yet. The app will start noticing durable facts as I mention them."
   ].join("\n");
 }
 
@@ -376,12 +402,20 @@ function createRealCoachChatSession(context: CoachContext, options: CoachSession
           deleteMealDeclaration,
           deleteWeightDeclaration,
           updateGoalDeclaration,
-          webSearchDeclaration
+          webSearchDeclaration,
+          forgetDeclaration
         ]
       }
     ],
     toolConfig: { functionCallingConfig: { mode: FunctionCallingMode.AUTO } },
-    generationConfig: { temperature: 0.4 }
+    // Leave thinking at the model default. Setting thinkingBudget to 0 made the model stop
+    // calling remember altogether — it would reply "noted" and silently save nothing — so the
+    // reasoning budget is load-bearing for tool selection here, not just answer quality.
+    // includeThoughts only surfaces the reasoning summary for display — it does not itself
+    // change how much the model thinks, so it's independent of the thinkingBudget concern above.
+    // thinkingBudget -1 is dynamic thinking, the same behaviour as leaving it unset; it is stated
+    // explicitly because includeThoughts returned no summary without an allocated budget.
+    generationConfig: { temperature: 0.4, thinkingConfig: { includeThoughts: true, thinkingBudget: -1 } }
   });
   const chat = model.startChat(options.history ? { history: options.history } : {});
 
@@ -389,6 +423,7 @@ function createRealCoachChatSession(context: CoachContext, options: CoachSession
     async send(request, onDelta) {
       try {
         const result = await chat.sendMessageStream(request);
+        let thought = "";
         for await (const chunk of result.stream) {
           try {
             const delta = chunk.text();
@@ -398,8 +433,24 @@ function createRealCoachChatSession(context: CoachContext, options: CoachSession
           } catch {
             // Blocked/empty content — a chunk can throw for the same reason as the final response.
           }
+          try {
+            const chunkThought = chunk.thoughtSummary?.();
+            if (chunkThought) {
+              thought += chunkThought;
+            }
+          } catch {
+            // Same reason as the text branch — a chunk can throw when content is blocked.
+          }
         }
         const response = await result.response;
+
+        if (!thought) {
+          try {
+            thought = response.thoughtSummary() ?? "";
+          } catch {
+            thought = "";
+          }
+        }
 
         let text = "";
         try {
@@ -416,7 +467,8 @@ function createRealCoachChatSession(context: CoachContext, options: CoachSession
           calls = [];
         }
 
-        return { text, functionCalls: calls };
+        // Capped because the whole chat snapshot goes into one AsyncStorage key.
+        return { text, functionCalls: calls, ...(thought ? { thought: thought.slice(0, 2000) } : {}) };
       } catch (error) {
         throw new AppError(
           error instanceof Error ? error.message : "Gemini coach chat failed.",
